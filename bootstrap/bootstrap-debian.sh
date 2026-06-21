@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bootstrap-debian.sh — build the DebiOnDeX Debian base rootfs (arm64) with mmdebstrap.
+# bootstrap-debian.sh — build the Breadstick Debian base rootfs (arm64) with mmdebstrap.
 #
 # Produces a compressed tarball under rootfs/dist/ that the app ships and extracts
 # under proot on-device. GNOME and the rest are layered on later (provisioning,
@@ -40,7 +40,7 @@ log() { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
 # uids are remapped, so apt/gpgv there fails with NO_PUBKEY — hence we STAGE the
 # keyring under $TMPDIR for the mmdebstrap call. The download stays cached in-repo.
 ensure_keyring() {
-    local stage="${TMPDIR:-/tmp}/debiondex-keyring"
+    local stage="${TMPDIR:-/tmp}/breadstick-keyring"
     mkdir -p "$stage"
     KEYRING="$stage/debian-archive-keyring.gpg"
 
