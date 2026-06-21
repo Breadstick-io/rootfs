@@ -84,6 +84,9 @@ pick_modes() {
 build() {
     mkdir -p "$OUT_DIR"
     local built=0 m
+    # Bake the Breadstick apt repo into the base so the rootfs ships pre-configured to pull
+    # custom packages from apt.breadstick.io (the app also ensures this at runtime).
+    local hookdir; hookdir="$(cd "$(dirname "$0")" && pwd)"
     for m in $(pick_modes); do
         log "Building ${SUITE}/${ARCH} base via mmdebstrap (mode=${m}) -> ${TARBALL}"
         if mmdebstrap \
@@ -93,6 +96,8 @@ build() {
                 --components=main \
                 --include="$INCLUDE" \
                 --keyring="$KEYRING" \
+                --customize-hook="copy-in '$hookdir/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
+                --customize-hook="copy-in '$hookdir/breadstick.sources' /etc/apt/sources.list.d" \
                 "$SUITE" "$TARBALL" "$MIRROR"; then
             built=1
             log "Base built successfully with mode=${m}"
