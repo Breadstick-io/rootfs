@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# bootstrap-debian.sh — build the DebiOnDeX Debian base rootfs (arm64) with mmdebstrap.
+#
+# Produces a compressed tarball under rootfs/dist/ that the app ships and extracts
+# under proot on-device. GNOME and the rest are layered on later (provisioning,
+# Phase 3). Runs fully unprivileged:
+#   * build mode: tries user-namespace (unshare), falls back to fakeroot
+#     (needed on Ubuntu 24.04, where AppArmor restricts unprivileged userns);
+#   * keyring: uses the host's Debian archive keyring if present, otherwise
+#     fetches it over HTTPS — so this works on an Ubuntu host with no root.
+#
+# Usage:
+#   rootfs/bootstrap/bootstrap-debian.sh [output-tarball]
+# Env overrides: SUITE, ARCH, MIRROR, INCLUDE, OUT_DIR
+#
+set -euo pipefail
+
+SUITE="${SUITE:-bookworm}"
+ARCH="${ARCH:-arm64}"
+MIRROR="${MIRROR:-http://deb.debian.org/debian}"
+# Minimal-but-usable base; the desktop (GNOME) is added in the provisioning step.
+# sudo + passwd for user accounts; ncurses-term for proper xterm-256color terminfo;
+# a few QoL CLI tools so the terminal is usable out of the box.
+INCLUDE="${INCLUDE:-ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps}"
+
+OUT_DIR="${OUT_DIR:-rootfs/dist}"
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"   # absolute: unshare mode re-execs, so relative paths break
+NAME="debian-${SUITE}-${ARCH}"
+if command -v zstd >/dev/null 2>&1; then EXT="tar.zst"; else EXT="tar.gz"; fi
+TARBALL="${1:-$OUT_DIR/$NAME.$EXT}"
+
+KEYRING=""
+
+log() { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
+
+# Provide the Debian archive keyring at a path that stays readable inside the
+# unshare (user-namespace) mount. Paths deep under $HOME become unreadable once
+# uids are remapped, so apt/gpgv there fails with NO_PUBKEY — hence we STAGE the
+# keyring under $TMPDIR for the mmdebstrap call. The download stays cached in-repo.
+ensure_keyring() {
+    local stage="${TMPDIR:-/tmp}/debiondex-keyring"
+    mkdir -p "$stage"
+    KEYRING="$stage/debian-archive-keyring.gpg"
+
+    # 1) Host keyring, if installed.
+    local h
+    for h in /usr/share/keyrings/debian-archive-keyring.gpg \
+             /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg; do
+        if [ -e "$h" ]; then cat "$h" > "$KEYRING"; log "Using host keyring: $h"; return 0; fi
+    done
+
+    # 2) Previously fetched + extracted in the repo cache.
+    local kdir="$OUT_DIR/.keyring"
+    local cached="$kdir/usr/share/keyrings/debian-archive-keyring.pgp"
+    if [ -s "$cached" ]; then
+        cat "$cached" > "$KEYRING"; log "Using cached keyring -> $KEYRING"; return 0
+    fi
+
+    # 3) Fetch the keyring package over HTTPS (no root needed).
+    mkdir -p "$kdir"
+    local base="https://deb.debian.org/debian/pool/main/d/debian-archive-keyring/"
+    log "Debian keyring not on host; fetching over HTTPS (no root needed)…"
+    curl -fsS "$base" -o "$kdir/index.html"
+    local deb
+    deb="$(grep -oE 'debian-archive-keyring_[^"]+_all\.deb' "$kdir/index.html" | sort -V | tail -1)"
+    [ -n "$deb" ] || { echo "ERROR: could not locate keyring package at $base" >&2; return 1; }
+    curl -fsSL "${base}${deb}" -o "$kdir/dak.deb"
+    dpkg-deb --fsys-tarfile "$kdir/dak.deb" | tar -C "$kdir" -x
+    # The aggregate .gpg is a symlink to the new-format .pgp; cat dereferences it.
+    local src="$kdir/usr/share/keyrings/debian-archive-keyring.gpg"
+    [ -e "$src" ] || src="$kdir/usr/share/keyrings/debian-archive-keyring.pgp"
+    [ -e "$src" ] || { echo "ERROR: keyring not found inside $deb" >&2; return 1; }
+    cat "$src" > "$KEYRING"
+    [ -s "$KEYRING" ] || { echo "ERROR: keyring staging failed" >&2; return 1; }
+    log "Fetched keyring ($deb), staged at $KEYRING"
+}
+
+pick_modes() {
+    if [ "$(id -u)" = 0 ]; then echo "root"; else echo "unshare fakeroot"; fi
+}
+
+build() {
+    mkdir -p "$OUT_DIR"
+    local built=0 m
+    for m in $(pick_modes); do
+        log "Building ${SUITE}/${ARCH} base via mmdebstrap (mode=${m}) -> ${TARBALL}"
+        if mmdebstrap \
+                --mode="$m" \
+                --arch="$ARCH" \
+                --variant=minbase \
+                --components=main \
+                --include="$INCLUDE" \
+                --keyring="$KEYRING" \
+                "$SUITE" "$TARBALL" "$MIRROR"; then
+            built=1
+            log "Base built successfully with mode=${m}"
+            break
+        fi
+        log "mode=${m} failed; cleaning up and trying the next mode"
+        rm -f "$TARBALL"
+    done
+    [ "$built" = 1 ] || { echo "ERROR: all mmdebstrap modes failed" >&2; exit 1; }
+}
+
+main() {
+    ensure_keyring
+    build
+    log "Artifact: ${TARBALL} ($(du -h "$TARBALL" | cut -f1))"
+    log "Sample contents:"
+    tar tf "$TARBALL" 2>/dev/null | head -n 8 || true
+    log "Next: extract under proot and provision GNOME (Phase 3) — see docs/ROADMAP.md"
+}
+
+main "$@"
