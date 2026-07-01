@@ -58,15 +58,18 @@ ensure_keyring() {
         cat "$cached" > "$KEYRING"; log "Using cached keyring -> $KEYRING"; return 0
     fi
 
-    # 3) Fetch the keyring package over HTTPS (no root needed).
+    # 3) Fetch the keyring package over HTTPS (no root needed). Pinned to the bookworm
+    # version + its sha256 (cross-checked against the signed bookworm Packages index) so a
+    # compromised/MITM'd mirror can't hand us a malicious trust root. If the pin goes stale
+    # (404 or hash mismatch), verify the new .deb out-of-band and update both lines.
     mkdir -p "$kdir"
     local base="https://deb.debian.org/debian/pool/main/d/debian-archive-keyring/"
-    log "Debian keyring not on host; fetching over HTTPS (no root needed)…"
-    curl -fsS "$base" -o "$kdir/index.html"
-    local deb
-    deb="$(grep -oE 'debian-archive-keyring_[^"]+_all\.deb' "$kdir/index.html" | sort -V | tail -1)"
-    [ -n "$deb" ] || { echo "ERROR: could not locate keyring package at $base" >&2; return 1; }
+    local deb="debian-archive-keyring_2023.3+deb12u2_all.deb"
+    local sha="f699e2f88dca05212f2a452b58475f2993cb6993dfbafb1d0205a3291eb8b4b8"
+    log "Debian keyring not on host; fetching $deb over HTTPS (no root needed)…"
     curl -fsSL "${base}${deb}" -o "$kdir/dak.deb"
+    echo "$sha  $kdir/dak.deb" | sha256sum -c --quiet - \
+        || { echo "ERROR: $deb sha256 mismatch — refusing untrusted keyring" >&2; return 1; }
     dpkg-deb --fsys-tarfile "$kdir/dak.deb" | tar -C "$kdir" -x
     # The aggregate .gpg is a symlink to the new-format .pgp; cat dereferences it.
     local src="$kdir/usr/share/keyrings/debian-archive-keyring.gpg"
