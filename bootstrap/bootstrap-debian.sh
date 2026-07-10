@@ -22,9 +22,11 @@ MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 # Minimal-but-usable base; the desktop (GNOME) is added in the provisioning step.
 # sudo + passwd for user accounts; ncurses-term for proper xterm-256color terminfo;
 # a few QoL CLI tools so the terminal is usable out of the box.
-INCLUDE="${INCLUDE:-ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps}"
+INCLUDE="${INCLUDE:-ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps,openssh-client}"
 
-OUT_DIR="${OUT_DIR:-rootfs/dist}"
+# Anchor the output dir to THIS script's location (rootfs/dist), not the caller's CWD —
+# running from inside rootfs/ used to produce a doubled rootfs/rootfs/dist path.
+OUT_DIR="${OUT_DIR:-$(cd "$(dirname "$0")/.." && pwd)/dist}"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"   # absolute: unshare mode re-execs, so relative paths break
 NAME="debian-${SUITE}-${ARCH}"
