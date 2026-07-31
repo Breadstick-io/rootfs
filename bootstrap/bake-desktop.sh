@@ -18,7 +18,10 @@ HOOKDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HOOKDIR/.." && pwd)"
 SUITE="${SUITE:-trixie}"
 ARCH=arm64
-MIRROR="${MIRROR:-http://deb.debian.org/debian}"
+# HTTPS by default. Package integrity already comes from the archive signature, but over
+# cleartext an observer still learns exactly which packages a device installs. The image
+# ships ca-certificates (see INCLUDE), so apt inside the guest can use it too.
+MIRROR="${MIRROR:-https://deb.debian.org/debian}"
 OUT_DIR="$ROOT/dist"
 TARBALL="$OUT_DIR/debian-${SUITE}-${ARCH}-desktop.tar.zst"
 PROVISION="$ROOT/../Android/app/src/main/assets/desktop/provision.sh"
