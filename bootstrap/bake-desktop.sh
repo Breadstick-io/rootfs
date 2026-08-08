@@ -34,7 +34,13 @@ mkdir -p "$OUT_DIR"
 STAGE="${TMPDIR:-/tmp}/breadstick-keyring"
 mkdir -p "$STAGE"
 KEYRING="$STAGE/debian-archive-keyring.gpg"
+# Both extensions: the keyring package has shipped .gpg historically and .pgp in newer
+# versions, and which one the cache holds depends on when it was extracted. Checking only
+# .pgp made this script fail with "run bootstrap-debian.sh once first" on a workspace that
+# had already been bootstrapped — the cached keyring was right there under the other name.
 for src in /usr/share/keyrings/debian-archive-keyring.gpg \
+           /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg \
+           "$OUT_DIR/.keyring/usr/share/keyrings/debian-archive-keyring.gpg" \
            "$OUT_DIR/.keyring/usr/share/keyrings/debian-archive-keyring.pgp"; do
     if [ -s "$src" ]; then cat "$src" > "$KEYRING"; break; fi
 done

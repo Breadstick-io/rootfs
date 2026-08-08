@@ -58,11 +58,16 @@ ensure_keyring() {
     done
 
     # 2) Previously fetched + extracted in the repo cache.
+    # Check both extensions, same as the extraction below: the keyring package ships .gpg in
+    # older versions and .pgp in newer ones, so a cache written by either is valid. Checking
+    # only .pgp meant an already-populated cache was ignored and re-downloaded every time.
     local kdir="$OUT_DIR/.keyring"
-    local cached="$kdir/usr/share/keyrings/debian-archive-keyring.pgp"
-    if [ -s "$cached" ]; then
-        cat "$cached" > "$KEYRING"; log "Using cached keyring -> $KEYRING"; return 0
-    fi
+    for cached in "$kdir/usr/share/keyrings/debian-archive-keyring.gpg" \
+                  "$kdir/usr/share/keyrings/debian-archive-keyring.pgp"; do
+        if [ -s "$cached" ]; then
+            cat "$cached" > "$KEYRING"; log "Using cached keyring -> $KEYRING"; return 0
+        fi
+    done
 
     # 3) Fetch the keyring package over HTTPS (no root needed). Pinned to the bookworm
     # version + its sha256 (cross-checked against the signed bookworm Packages index) so a
