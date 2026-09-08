@@ -64,8 +64,26 @@ mmdebstrap \
     "$SUITE" "$TARBALL" "$MIRROR"
 
 log "Verifying the bake marker + desktop stack in the image..."
-zstd -dc "$TARBALL" | tar tf - | grep -qE '\./etc/breadstick/desktop-ok' || {
-    echo "ERROR: desktop-ok marker missing — provision did not complete" >&2; exit 1; }
-zstd -dc "$TARBALL" | tar tf - | grep -qE '\./usr/bin/openbox' || {
-    echo "ERROR: openbox missing from the baked image" >&2; exit 1; }
+# One listing, reused: each pass decompresses the whole 350 MB image.
+LIST="${TMPDIR:-/tmp}/breadstick-bake-list.$$"
+zstd -dc "$TARBALL" | tar tf - > "$LIST"
+trap 'rm -f "$LIST"' EXIT
+
+need() { grep -qE "$1" "$LIST" || { echo "ERROR: $2" >&2; exit 1; }; }
+need '\./etc/breadstick/desktop-ok' "desktop-ok marker missing — provision did not complete"
+need '\./usr/bin/openbox' "openbox missing from the baked image"
+
+# And that it is BREADSTICK, not just XFCE.
+#
+# This is the check whose absence shipped: an image built before the retheme carried a complete
+# desktop and none of Breadstick's shell, so it passed both tests above and came up looking like
+# stock XFCE. Present-and-correct means the session script the image ships actually applies the
+# look -- a file that merely exists is not enough, because the old breadstick-session had that
+# file too and it did nothing.
+need '\./usr/lib/breadstick/apply-look.sh' "the Breadstick shell is missing (breadstick-theme did not install)"
+need '\./usr/lib/breadstick/start-desktop-x11.sh' "breadstick-session did not install its session script"
+zstd -dc "$TARBALL" | tar xOf - ./usr/lib/breadstick/start-desktop-x11.sh 2>/dev/null \
+    | grep -q apply-look || {
+    echo "ERROR: the baked session script never applies the Breadstick look" >&2; exit 1; }
+log "Breadstick shell present and wired into the session."
 log "Artifact: $TARBALL ($(du -h "$TARBALL" | cut -f1))"
