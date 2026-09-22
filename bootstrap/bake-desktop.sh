@@ -86,4 +86,19 @@ zstd -dc "$TARBALL" | tar xOf - ./usr/lib/breadstick/start-desktop-x11.sh 2>/dev
     | grep -q apply-look || {
     echo "ERROR: the baked session script never applies the Breadstick look" >&2; exit 1; }
 log "Breadstick shell present and wired into the session."
+# mmdebstrap compresses at zstd's default level 3. Level 19 makes the same image about a fifth
+# smaller (400 MB to 313 MB measured on 202609210121): every new install downloads less, the upload
+# from here takes minutes less, and the file stays well clear of Cloudflare's 512 MB per-file cache
+# limit, past which every download would come from the one-CPU origin. Decompression speed is about
+# the same, and the window stays at 8 MB, far inside what the app's zstd-jni decoder allows.
+LEVEL="${BAKE_ZSTD_LEVEL:-19}"
+if [ "$LEVEL" != 3 ]; then
+    log "Recompressing at zstd level $LEVEL..."
+    zstd -dc "$TARBALL" | zstd -q -"$LEVEL" -T0 -o "$TARBALL.recompressed" \
+        && zstd -q -t "$TARBALL.recompressed" \
+        && mv -f "$TARBALL.recompressed" "$TARBALL"
+fi
+# Which Breadstick packages the image carries, for the record.
+zstd -dc "$TARBALL" | tar xOf - ./var/lib/dpkg/status 2>/dev/null \
+    | awk '/^Package: breadstick-/{p=$2} /^Version:/ && p {print "  " p " " $2; p=""}'
 log "Artifact: $TARBALL ($(du -h "$TARBALL" | cut -f1))"
