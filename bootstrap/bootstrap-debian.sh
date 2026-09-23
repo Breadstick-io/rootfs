@@ -26,7 +26,7 @@ MIRROR="${MIRROR:-https://deb.debian.org/debian}"
 # sudo + passwd for user accounts; ncurses-term for proper xterm-256color terminfo;
 # a few QoL CLI tools so the terminal is usable out of the box.
 # tmux: the terminal attaches to a persistent session so shells survive the app being killed.
-INCLUDE="${INCLUDE:-ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps,openssh-client,tmux}"
+INCLUDE="${INCLUDE:-ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps,openssh-client,tmux,curl}"
 
 # Anchor the output dir to THIS script's location (rootfs/dist), not the caller's CWD —
 # running from inside rootfs/ used to produce a doubled rootfs/rootfs/dist path.
