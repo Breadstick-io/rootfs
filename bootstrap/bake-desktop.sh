@@ -10,12 +10,17 @@
 #
 # Usage: [SUITE=trixie] [ARCH=arm64] bootstrap/bake-desktop.sh
 #   -> rootfs/dist/debian-<suite>-<arch>-desktop.tar.zst
-# Env overrides: SUITE, ARCH, MIRROR, OUT_DIR, PROVISION (as bootstrap-debian.sh takes them).
+# Env overrides: SUITE, ARCH, MIRROR, OUT_DIR, PROVISION (as bootstrap-debian.sh takes them), and
+# BREADSTICK_SOURCES: a deb822 sources file to bake in instead of bootstrap/breadstick.sources, for a
+# bake against a STAGED repo (Apt/public served by a local HTTP server, signed by the same key) before
+# it is published: that is how the first amd64 image was baked (2026-10-06) while apt.breadstick.io
+# still served arm64 alone. The image then carries that file: never publish one baked this way.
 # ARCH=amd64 bakes the x86-64 image on this arm64 host under qemu-user (Debian's qemu 10,
 # AutoBuild/tools/qemu-x86_64-setup.sh; Ubuntu's 8.2.2 crashes apt's signature checker), about
 # 7 minutes for provision.sh on 2026-10-05, and needs apt.breadstick.io to serve amd64 (apt 1.0.23
-# and later). The CDN manifests still name only the arm64 images: AutoBuild/deploy/rootfs-image.sh
-# stages arm64 alone until the app can ask for an amd64 image.
+# and later). AutoBuild/deploy/rootfs-image.sh publishes the amd64 images under their own manifest
+# names (manifest-amd64.json, manifest-desktop-amd64.json), which only the x86_64 build of the app
+# reads; the image is UNTESTED ON HARDWARE until an Intel Googlebook exists.
 set -eu
 
 log() { printf '\033[1;34m[bake]\033[0m %s\n' "$*"; }
@@ -32,6 +37,8 @@ OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 TARBALL="$OUT_DIR/debian-${SUITE}-${ARCH}-desktop.tar.zst"
 PROVISION="${PROVISION:-$ROOT/../Android/app/src/main/assets/desktop/provision.sh}"
 [ -f "$PROVISION" ] || { echo "ERROR: $PROVISION not found" >&2; exit 1; }
+SOURCES="${BREADSTICK_SOURCES:-$HOOKDIR/breadstick.sources}"
+[ -f "$SOURCES" ] || { echo "ERROR: $SOURCES not found" >&2; exit 1; }
 mkdir -p "$OUT_DIR"
 
 # Stage the archive keyring under /tmp: paths under $HOME become unreadable inside the
@@ -63,7 +70,7 @@ mmdebstrap \
     --include="$INCLUDE" \
     --keyring="$KEYRING" \
     --customize-hook="copy-in '$HOOKDIR/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
-    --customize-hook="copy-in '$HOOKDIR/breadstick.sources' /etc/apt/sources.list.d" \
+    --customize-hook="copy-in '$SOURCES' /etc/apt/sources.list.d" \
     --customize-hook="copy-in '$PROVISION' /root" \
     --customize-hook='chroot "$1" sh /root/provision.sh' \
     --customize-hook='chroot "$1" rm -f /root/provision.sh' \
