@@ -8,8 +8,14 @@
 # shims (systemctl/setpriv/... in /usr/local/bin) are installed by provision.sh, so the
 # baked image behaves identically to a runtime-provisioned one, marker file included.
 #
-# Usage: [SUITE=trixie] bootstrap/bake-desktop.sh
-#   -> rootfs/dist/debian-<suite>-arm64-desktop.tar.zst
+# Usage: [SUITE=trixie] [ARCH=arm64] bootstrap/bake-desktop.sh
+#   -> rootfs/dist/debian-<suite>-<arch>-desktop.tar.zst
+# Env overrides: SUITE, ARCH, MIRROR, OUT_DIR, PROVISION (as bootstrap-debian.sh takes them).
+# ARCH=amd64 bakes the x86-64 image on this arm64 host under qemu-user (Debian's qemu 10,
+# AutoBuild/tools/qemu-x86_64-setup.sh; Ubuntu's 8.2.2 crashes apt's signature checker), about
+# 7 minutes for provision.sh on 2026-10-05, and needs apt.breadstick.io to serve amd64 (apt 1.0.23
+# and later). The CDN manifests still name only the arm64 images: AutoBuild/deploy/rootfs-image.sh
+# stages arm64 alone until the app can ask for an amd64 image.
 set -eu
 
 log() { printf '\033[1;34m[bake]\033[0m %s\n' "$*"; }
@@ -17,14 +23,14 @@ log() { printf '\033[1;34m[bake]\033[0m %s\n' "$*"; }
 HOOKDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HOOKDIR/.." && pwd)"
 SUITE="${SUITE:-trixie}"
-ARCH=arm64
+ARCH="${ARCH:-arm64}"
 # HTTPS by default. Package integrity already comes from the archive signature, but over
 # cleartext an observer still learns exactly which packages a device installs. The image
 # ships ca-certificates (see INCLUDE), so apt inside the guest can use it too.
 MIRROR="${MIRROR:-https://deb.debian.org/debian}"
-OUT_DIR="$ROOT/dist"
+OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 TARBALL="$OUT_DIR/debian-${SUITE}-${ARCH}-desktop.tar.zst"
-PROVISION="$ROOT/../Android/app/src/main/assets/desktop/provision.sh"
+PROVISION="${PROVISION:-$ROOT/../Android/app/src/main/assets/desktop/provision.sh}"
 [ -f "$PROVISION" ] || { echo "ERROR: $PROVISION not found" >&2; exit 1; }
 mkdir -p "$OUT_DIR"
 
