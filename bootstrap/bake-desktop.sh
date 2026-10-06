@@ -14,7 +14,11 @@
 # BREADSTICK_SOURCES: a deb822 sources file to bake in instead of bootstrap/breadstick.sources, for a
 # bake against a STAGED repo (Apt/public served by a local HTTP server, signed by the same key) before
 # it is published: that is how the first amd64 image was baked (2026-10-06) while apt.breadstick.io
-# still served arm64 alone. The image then carries that file: never publish one baked this way.
+# still served arm64 alone. The image then carries that file, and a device installed from it would
+# never see another update (apt against a loopback address), so such a bake is NAMED
+# debian-<suite>-<arch>-desktop-staged.tar.zst, which AutoBuild/deploy/rootfs-image.sh refuses by name,
+# and it refuses any image whose breadstick.sources is not https://apt.breadstick.io as well. A bake
+# for publishing uses the default sources: rebake once the packages are live.
 # ARCH=amd64 bakes the x86-64 image on this arm64 host under qemu-user (Debian's qemu 10,
 # AutoBuild/tools/qemu-x86_64-setup.sh; Ubuntu's 8.2.2 crashes apt's signature checker), about
 # 7 minutes for provision.sh on 2026-10-05, and needs apt.breadstick.io to serve amd64 (apt 1.0.23
@@ -39,6 +43,12 @@ PROVISION="${PROVISION:-$ROOT/../Android/app/src/main/assets/desktop/provision.s
 [ -f "$PROVISION" ] || { echo "ERROR: $PROVISION not found" >&2; exit 1; }
 SOURCES="${BREADSTICK_SOURCES:-$HOOKDIR/breadstick.sources}"
 [ -f "$SOURCES" ] || { echo "ERROR: $SOURCES not found" >&2; exit 1; }
+# Decided by what the file says, not by which file was given: only the public repo makes a
+# publishable image; anything else (a loopback staging server) is marked in the file name.
+if ! grep -qE '^URIs:[[:space:]]*https://apt\.breadstick\.io/?[[:space:]]*$' "$SOURCES"; then
+    TARBALL="$OUT_DIR/debian-${SUITE}-${ARCH}-desktop-staged.tar.zst"
+    log "NOTE: $SOURCES is not the public repo: the image is named $(basename "$TARBALL") and cannot be published"
+fi
 mkdir -p "$OUT_DIR"
 
 # Stage the archive keyring under /tmp: paths under $HOME become unreadable inside the
