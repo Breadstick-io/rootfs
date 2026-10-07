@@ -1,0 +1,15 @@
+[Unit]
+Description=Breadstick VM network routes (dummy bsl0, nftables redirect)
+DefaultDependencies=no
+After=systemd-modules-load.service systemd-tmpfiles-setup.service
+# After tmpfiles: systemd-resolved's tmpfiles.d links /etc/resolv.conf to its stub at every boot.
+Before=network.target bsl-vmnet.service
+ConditionKernelCommandLine=!bsl.net=tap
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/breadstick-vm/vmnet-setup
+
+[Install]
+WantedBy=multi-user.target

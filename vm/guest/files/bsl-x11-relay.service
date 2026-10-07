@@ -1,0 +1,12 @@
+[Unit]
+Description=Breadstick VM display relay (vsock 6000 <-> /tmp/.X11-unix/X0)
+# After tmpfiles: its --remove pass empties /tmp/.X11-unix at boot.
+After=local-fs.target systemd-tmpfiles-setup.service
+
+[Service]
+ExecStart=/usr/lib/breadstick-vm/bsl-x11-relay 6000 /tmp/.X11-unix/X0
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

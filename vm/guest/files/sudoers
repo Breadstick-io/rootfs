@@ -1,0 +1,2 @@
+# Breadstick VM: members of sudo run anything without a password, as in the Standard engine.
+%sudo ALL=(ALL:ALL) NOPASSWD: ALL

@@ -1,0 +1,13 @@
+[Unit]
+Description=Breadstick VM networking through the app (vsock 5100)
+After=bsl-vmnet-setup.service
+Requires=bsl-vmnet-setup.service
+ConditionKernelCommandLine=!bsl.net=tap
+
+[Service]
+ExecStart=/usr/lib/breadstick-vm/bsl-vmnet 5100 15001 53
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

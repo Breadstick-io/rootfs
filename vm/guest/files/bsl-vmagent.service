@@ -1,0 +1,13 @@
+[Unit]
+Description=Breadstick VM agent (vsock 5000, host only)
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=sysinit.target
+
+[Service]
+ExecStart=/usr/lib/breadstick-vm/bsl-vmagent 5000
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=sysinit.target

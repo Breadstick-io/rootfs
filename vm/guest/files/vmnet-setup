@@ -1,0 +1,20 @@
+#!/bin/sh
+# The VM has no network card: its default routes point at a dummy interface, and nftables sends
+# every TCP connection routed there to bsl-vmnet, which carries it to the app over vsock
+# (vm/PROTOCOL.md, BSN1). DNS goes to bsl-vmnet on 127.0.0.1:53.
+set -e
+ip link show bsl0 >/dev/null 2>&1 || ip link add bsl0 type dummy
+ip link set bsl0 up
+ip addr replace 10.0.2.15/24 dev bsl0
+ip route replace default dev bsl0
+# IPv4 only. The guest's connect() is answered locally by bsl-vmnet, so a destination the device
+# cannot reach shows up as a reset AFTER connecting, and programs do not fall back to the next
+# address. With no IPv6 route they get "network unreachable" at once and use IPv4, which Android
+# carries on IPv6-only networks too (464XLAT).
+nft -f /usr/lib/breadstick-vm/vmnet.nft
+# resolv.conf is ours (bsl-vmnet answers on 127.0.0.1:53), unless /etc/breadstick-vm/own-resolv-conf
+# exists: then the user manages it.
+if [ ! -e /etc/breadstick-vm/own-resolv-conf ]; then
+  rm -f /etc/resolv.conf
+  printf '# breadstick-vm: DNS through the app\nnameserver 127.0.0.1\noptions edns0 trust-ad\n' > /etc/resolv.conf
+fi

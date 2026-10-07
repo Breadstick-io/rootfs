@@ -1,0 +1,9 @@
+# Breadstick VM: TCP routed to the dummy interface goes to bsl-vmnet (127.0.0.1 / ::1, port 15001).
+table inet breadstick_vm
+delete table inet breadstick_vm
+table inet breadstick_vm {
+  chain output {
+    type nat hook output priority -100; policy accept;
+    oifname "bsl0" meta l4proto tcp redirect to :15001
+  }
+}
