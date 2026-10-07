@@ -122,6 +122,65 @@ check("apt-get update", st == 0 and "Reading package lists" in o and "Err" not i
 o, st = run("DEBIAN_FRONTEND=noninteractive apt-get install -y -q cowsay >/dev/null 2>&1 && /usr/games/cowsay moo | tail -1")
 check("apt-get install", st == 0, o.strip())
 
+# The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
+# channels to the guest relay on vsock 6000, the way the app's VmX11Relay does it.
+if os.path.exists("/usr/bin/Xvfb"):
+    import socket as so
+    xvfb = subprocess.Popen(["Xvfb", ":5", "-screen", "0", "1280x800x24", "-nolisten", "tcp"], stderr=subprocess.DEVNULL)
+    time.sleep(1.5)
+
+    def x11_pool():
+        idle = [0]
+        lock = threading.Lock()
+
+        def chan(c):
+            try:
+                first = c.recv(65536)
+            except OSError:
+                first = b""
+            with lock:
+                idle[0] -= 1
+            if not first:
+                c.close()
+                return
+            x = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+            x.connect("/tmp/.X11-unix/X5")
+            x.sendall(first)
+            threading.Thread(target=lambda: (bslvm.splice(x, c), c.close()), daemon=True).start()
+            bslvm.splice(c, x)
+            try:
+                x.shutdown(so.SHUT_WR)
+            except OSError:
+                pass
+
+        while True:
+            with lock:
+                n = idle[0]
+            if n < 4:
+                try:
+                    c = bslvm.connect(args, 6000)
+                except OSError:
+                    time.sleep(0.3)
+                    continue
+                with lock:
+                    idle[0] += 1
+                threading.Thread(target=chan, args=(c,), daemon=True).start()
+            else:
+                time.sleep(0.05)
+
+    threading.Thread(target=x11_pool, daemon=True).start()
+    time.sleep(1)
+    o, st = run("DISPLAY=:0 xdpyinfo | grep -E 'dimensions|number of screens'", user="tester")
+    check("x11 relay", st == 0 and "1280x800" in o, o.strip().replace("\n", " | "))
+    o, st = run("command -v startxfce4 >/dev/null || exit 77; (DISPLAY=:0 timeout 25 startxfce4 >/tmp/xfce.log 2>&1 &); "
+                "sleep 20; DISPLAY=:0 xwininfo -root -children | grep -c -E 'xfce4-panel|xfdesktop|Xfwm4' ; pgrep -c -u tester -x xfwm4",
+                user="tester")
+    if st == 77:
+        print("SKIP xfce (no desktop in this image)")
+    else:
+        check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
+    xvfb.kill()
+
 # Clean power-off.
 out, st = bslvm.simple(args, "o", b"poweroff")
 try:
