@@ -71,9 +71,22 @@ check("write file", st == 0 and o.split() == ["640", "hello"], o)
 o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend")
 check("systemd", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
 
-# The app's user preparation (VmCommands.prepareUserScript).
-prep = open("/t/prepare-user.sh").read() if os.path.exists("/t/prepare-user.sh") else None
-o, st = run(prep or "true")
+# The app's user preparation: a copy of Android vm/VmCommands.prepareUserScript("tester").
+PREPARE_USER = r"""
+set -u
+u='tester'
+if ! id -u "$u" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash -G sudo,audio,video,plugdev,users "$u" 2>/dev/null || useradd -m -s /bin/bash -G sudo "$u" || exit 1
+  passwd -d "$u" >/dev/null 2>&1 || true
+fi
+mkdir -p /run/bsl && echo vm > /run/bsl/engine
+uid=$(id -u "$u")
+loginctl enable-linger "$u" 2>/dev/null || true
+i=0
+while [ ! -S "/run/user/$uid/bus" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+[ -S "/run/user/$uid/bus" ] && echo "bus ok" || echo "no user bus (session apps may complain)"
+"""
+o, st = run(PREPARE_USER)
 check("prepare user", st == 0 and "bus ok" in o, o.strip())
 o, st = run("id -un; echo $XDG_RUNTIME_DIR; echo $DBUS_SESSION_BUS_ADDRESS; sudo -n true && echo sudo-ok", user="tester")
 check("user session", st == 0 and "tester" in o and "/run/user/" in o and "sudo-ok" in o, o.strip().replace("\n", " | "))
