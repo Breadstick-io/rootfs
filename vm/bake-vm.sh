@@ -118,7 +118,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
 #    turned into ext4 in a container (Debian 13's e2fsprogs); the kernel and initramfs come out of
 #    the same tree. Native container: this step only moves data.
 log "making the ext4 disk"
-docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
+docker run --rm --platform "linux/$(dpkg --print-architecture)" -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
   command -v mke2fs >/dev/null || { apt-get update -qq >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq e2fsprogs >/dev/null; }
   mkdir /r
   tar -C /r --numeric-owner -xpf /s/root.tar
