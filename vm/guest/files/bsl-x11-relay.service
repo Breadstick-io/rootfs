@@ -7,6 +7,8 @@ After=local-fs.target systemd-tmpfiles-setup.service
 ExecStart=/usr/lib/breadstick-vm/bsl-x11-relay 6000 /tmp/.X11-unix/X0
 Restart=always
 RestartSec=1
+# Never the out-of-memory killer's pick: a game running Linux out of memory must not cut the app off.
+OOMScoreAdjust=-1000
 
 [Install]
 WantedBy=multi-user.target

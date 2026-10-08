@@ -8,6 +8,8 @@ Before=sysinit.target
 ExecStart=/usr/lib/breadstick-vm/bsl-vmagent 5000
 Restart=always
 RestartSec=1
+# Never the out-of-memory killer's pick: a game running Linux out of memory must not cut the app off.
+OOMScoreAdjust=-1000
 
 [Install]
 WantedBy=sysinit.target

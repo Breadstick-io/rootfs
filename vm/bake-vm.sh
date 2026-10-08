@@ -76,7 +76,7 @@ chmod -R a+rX "$STAGE"
 #    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
 INCLUDE="systemd-sysv,udev,dbus,dbus-user-session,libpam-systemd,$KPKG,initramfs-tools,kmod,iproute2,nftables,\
 sudo,passwd,ca-certificates,locales,less,nano,procps,psmisc,curl,wget,tmux,openssh-client,bash-completion,python3,\
-apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,\
+apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,systemd-zram-generator,\
 xterm,x11-apps,x11-utils,x11-xserver-utils,xdotool,wmctrl,dbus-x11,fonts-dejavu-core,xauth"
 if [ "$DESKTOP" = 1 ]; then
   INCLUDE="$INCLUDE,xfce4-session,xfwm4,xfce4-panel,xfdesktop4,xfce4-settings,xfconf,thunar,xfce4-terminal,\
@@ -106,6 +106,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook="upload '$STAGE/journald.conf' /etc/systemd/journald.conf.d/breadstick-vm.conf" \
   --customize-hook="upload '$STAGE/sudoers' /etc/sudoers.d/breadstick-vm" \
   --customize-hook="upload '$STAGE/profile.sh' /etc/profile.d/breadstick-vm.sh" \
+  --customize-hook="upload '$STAGE/zram-generator.conf' /etc/systemd/zram-generator.conf" \
   --customize-hook='chmod 440 "$1/etc/sudoers.d/breadstick-vm"; chmod 755 "$1"/usr/lib/breadstick-vm/bsl-* "$1/usr/lib/breadstick-vm/vmnet-setup"' \
   --customize-hook='chroot "$1" systemctl enable bsl-vmagent.service bsl-vmnet-setup.service bsl-vmnet.service bsl-x11-relay.service' \
   --customize-hook='chroot "$1" systemctl mask apt-daily.timer apt-daily-upgrade.timer serial-getty@ttyS0.service serial-getty@hvc0.service getty@tty1.service systemd-networkd-wait-online.service 2>/dev/null || true' \
