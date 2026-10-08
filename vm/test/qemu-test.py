@@ -366,6 +366,8 @@ def files_test():
                 "mountpoint -q /mnt/host && echo still-mounted || echo unmounted")
     check("files: closing the channel unmounts", "unmounted" in o, o.strip())
     sftp.kill()
+    # Made as root in this container: qemu-test.sh, which is not, could not remove it from /w.
+    __import__("shutil").rmtree("/w/share", ignore_errors=True)
 
 
 # The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
