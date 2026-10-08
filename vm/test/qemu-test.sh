@@ -14,5 +14,8 @@ trap 'cp "$work/console.log" "${KEEP_CONSOLE:-/dev/null}" 2>/dev/null; rm -rf "$
 zstd -q -dc "$IMG/root.img.zst" > "$work/root.img"
 truncate -s 8G "$work/root.img"
 cp "$IMG/vmlinuz" "$IMG/initrd.img" "$work/"
-docker run --rm --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
+# The app's VM helpers (Android app/src/main/assets/vm), for the bridges test; skipped without them.
+ASSETS=${ANDROID_ASSETS:-$here/../../../Android/app/src/main/assets/vm}
+[ -d "$ASSETS" ] && A="-v $(cd "$ASSETS" && pwd):/a:ro" || A=
+docker run --rm $A --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:2 python3 /t/qemu-test.py

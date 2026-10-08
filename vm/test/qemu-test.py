@@ -144,6 +144,167 @@ check("apt-get update", st == 0 and "Reading package lists" in o and "Err" not i
 o, st = run("DEBIAN_FRONTEND=noninteractive apt-get install -y -q cowsay >/dev/null 2>&1 && /usr/games/cowsay moo | tail -1")
 check("apt-get install", st == 0, o.strip())
 
+class Chan:
+    """An agent 'r' run kept open: stdin sent as it comes, output gathered by a thread (bytes)."""
+
+    def __init__(self, cmd, user="root", env=()):
+        self.s = bslvm.connect(args, bslvm.AGENT_PORT)
+        bslvm.request(self.s, "r", bslvm.run_payload(cmd, user, env=env))
+        self.buf = bytearray()
+        self.status = None
+        self.lock = threading.Lock()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            for t, d in bslvm.frames(self.s):
+                if t == "o":
+                    with self.lock:
+                        self.buf += d
+                elif t == "x":
+                    self.status = struct.unpack("<i", d)[0]
+        except (OSError, EOFError):
+            pass
+
+    def send(self, data):
+        for i in range(0, len(data), 65536):
+            bslvm.send_frame(self.s, "d", data[i:i + 65536])
+
+    def take(self):
+        with self.lock:
+            b = bytes(self.buf)
+            self.buf.clear()
+            return b
+
+    def lines(self, timeout, until):
+        """Collected output lines until one matches until(line) or the time is up."""
+        got, t0, rest = [], time.time(), b""
+        while time.time() - t0 < timeout:
+            rest += self.take()
+            while b"\n" in rest:
+                line, rest = rest.split(b"\n", 1)
+                got.append(line.decode("ascii", "replace"))
+                if until(got[-1]):
+                    return got
+            time.sleep(0.1)
+        return got
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+# Android's VmAudio.OUT_CMD / MIC_CMD and VmShare's helper command, as the app sends them.
+AUDIO_OUT = ("exec bash -c 'exec 2>/dev/null; until (exec 3</dev/tcp/127.0.0.1/4713); do sleep 1; done; "
+             "exec cat </dev/tcp/127.0.0.1/4713'")
+MIC_IN = "exec 2>/dev/null; [ -p /tmp/bsl-mic.fifo ] || exit 3; exec cat > /tmp/bsl-mic.fifo"
+HELPER = "/a/bsl-vmbridge.py"
+
+
+def b64(b):
+    import base64
+    return base64.b64encode(b).decode()
+
+
+def bridges_test():
+    """The VM session's bridges (Android vm/VmBridges.kt): the session script in Floating mode as the app
+    starts it in the VM, then sound out, the microphone in, a notification and the clipboard both ways."""
+    if not os.path.exists(HELPER):
+        print("SKIP bridges (no Android assets mounted at /a)")
+        return
+    o, st = run("[ -f /usr/lib/breadstick/start-desktop-x11.sh ] || exit 77")
+    if st == 77:
+        print("SKIP bridges (no breadstick-session in this image)")
+        return
+    # VmBridges.beforeSession: what the app speaks.
+    _, st = bslvm.simple(args, "f", b"/run/bsl/features\0" + b"644\0" + b"notify-v2 clipboard-v1\n")
+    check("bridges: features written", st == 0)
+    # LinuxEnvironment.desktopSessionScript(0, rootless=true, vm=true), run as root with displayEnv(true).
+    session = Chan("export BREADSTICK_WAYLAND=0 BREADSTICK_COMPOSITOR=0 BREADSTICK_DARK=0 BREADSTICK_LOCALE=en_US.UTF-8 "
+                   "BREADSTICK_DPI=96 BREADSTICK_GPU=0; export BREADSTICK_VOLUMES=''; "
+                   "F=/usr/lib/breadstick/start-desktop-x11.sh; sh \"$F\" 0 tester 1",
+                   env=["DISPLAY=:0", "NO_AT_BRIDGE=1", "LIBGL_KOPPER_DISABLE=1", "BREADSTICK_ROOTLESS=1"])
+    up = session.lines(90, lambda l: "rootless mode" in l)
+    check("bridges: session up (Floating)", any("rootless mode" in l for l in up), " | ".join(up[-6:]))
+    time.sleep(3)
+    o, st = run("bsl-audio status; pgrep -u tester -f bsl-notifyd >/dev/null && echo notifyd; "
+                "pgrep -u tester -f bsl-clipboard >/dev/null && echo clipboard",
+                user="tester", env=["XDG_RUNTIME_DIR=/tmp/runtime-tester", "PULSE_RUNTIME_PATH=/tmp/runtime-tester/pulse"])
+    check("bridges: session daemons", "tcp-modules=1" in o and "notifyd" in o and "clipboard" in o, o.strip().replace("\n", " | "))
+
+    # Sound out: a tone played in the VM arrives on the stream.
+    out = Chan(AUDIO_OUT, user="tester")
+    time.sleep(1)
+    out.take()
+    tone = ("import math,sys\n"
+            "f=bytearray()\n"
+            "for i in range(48000*2):\n"
+            "    v=int(12000*math.sin(i*2*math.pi*440/48000)); f+=v.to_bytes(2,'little',signed=True)*2\n"
+            "sys.stdout.buffer.write(f)")
+    o, st = run(f"python3 -c \"{tone}\" | pacat --raw --rate=48000 --channels=2 --format=s16le",
+                user="tester", env=["PULSE_SERVER=unix:/tmp/runtime-tester/pulse/native"])
+    time.sleep(0.5)
+    pcm = out.take()
+    nonzero = sum(1 for i in range(0, len(pcm) - 1, 2) if pcm[i] or pcm[i + 1])
+    check("bridges: sound reaches the stream", st == 0 and len(pcm) > 48000 * 4 and nonzero > 48000,
+          f"pacat status {st}, {len(pcm)} bytes, {nonzero} non-silent samples")
+    out.close()
+
+    # The microphone: PCM written into the FIFO is what the VM records from breadstick_mic.
+    mic = Chan(MIC_IN, user="tester")
+    rec = Chan("timeout 3 parecord -d breadstick_mic --raw --rate=48000 --channels=1 --format=s16le | wc -c; "
+               "true", user="tester", env=["PULSE_SERVER=unix:/tmp/runtime-tester/pulse/native"])
+    sine = b"".join(int(12000 * __import__("math").sin(i * 0.0575)).to_bytes(2, "little", signed=True) for i in range(48000))
+    for _ in range(5):
+        mic.send(sine[:19200])
+        time.sleep(0.1)
+        mic.send(sine[19200:38400])
+        time.sleep(0.3)
+    time.sleep(1)
+    got = rec.lines(10, lambda l: l.strip().isdigit())
+    check("bridges: microphone reaches PulseAudio", mic.status is None and got and got[-1].strip().isdigit() and int(got[-1]) > 0,
+          f"mic {'running' if mic.status is None else 'exited ' + str(mic.status)}, recorded {got[-1:]} bytes")
+    mic.close()
+    rec.close()
+
+    # Notifications and the clipboard through the helper the app ships.
+    helper = Chan("exec python3 -I -c '" + open(HELPER).read().replace("'", "'\\''") + "' 2>>/tmp/bsl-vmbridge.log", user="tester")
+    first = helper.lines(10, lambda l: l.startswith("R "))
+    check("bridges: helper sees bsl-clipboard", "R 1" in first, " | ".join(first))
+    notify = ("import dbus; b=dbus.SessionBus(); n=dbus.Interface(b.get_object('org.freedesktop.Notifications',"
+              "'/org/freedesktop/Notifications'),'org.freedesktop.Notifications'); "
+              "print(n.Notify('qemu-test',0,'','Hello from the VM','it works',[],{},5000))")
+    o, st = run(f"python3 -c \"{notify}\"", user="tester", env=["DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/runtime-tester/bus"])
+    got = helper.lines(10, lambda l: l.startswith("A .bsl-notify"))
+    import base64
+    note = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify")]
+    check("bridges: a notification reaches the app", st == 0 and any("Hello from the VM" in n for n in note), (o.strip(), note).__repr__())
+    o, st = run("(printf 'copied in the VM' | timeout 10 xclip -quiet -selection clipboard >/dev/null 2>&1 &); echo ok",
+                user="tester", env=["DISPLAY=:0"])
+    got = helper.lines(8, lambda l: False)
+    text = None
+    path = None
+    for l in got:
+        if l.startswith("B "):
+            path, data = l[2:], b""
+        elif l.startswith("D "):
+            data += base64.b64decode(l[2:])
+        elif l == "E" and path and path.endswith("text.txt"):
+            text = data.decode()
+    check("bridges: a Linux copy reaches the app", text == "copied in the VM", repr([l[:60] for l in got]))
+    offer = [f"B .bsl-clip/to-linux/text.txt", "D " + b64(b"copied on Android"), "E",
+             "B .bsl-clip/to-linux/offer.json", "D " + b64(b'{"serial": 41, "text": "text.txt"}'), "E"]
+    helper.send(("\n".join(offer) + "\n").encode())
+    time.sleep(3)
+    o, st = run("timeout 5 xclip -o -selection clipboard", user="tester", env=["DISPLAY=:0"])
+    check("bridges: an Android copy pastes in the VM", o == "copied on Android", repr(o))
+    helper.close()
+    session.close()
+    time.sleep(2)
+
+
 # The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
 # channels to the guest relay on vsock 6000, the way the app's VmX11Relay does it.
 if os.path.exists("/usr/bin/Xvfb"):
@@ -201,6 +362,7 @@ if os.path.exists("/usr/bin/Xvfb"):
         print("SKIP xfce (no desktop in this image)")
     else:
         check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
+    bridges_test()
     xvfb.kill()
 
 # The disk grows without losing anything (Android vm/VmDisk.kt): data written now must be there
