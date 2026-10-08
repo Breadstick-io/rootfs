@@ -35,28 +35,50 @@ else:
     qemu = ["qemu-system-x86_64", "-M", "q35", "-cpu", "max", "-accel", "tcg"]
     console = "console=ttyS0"
 cmdline = f"{console} root=/dev/vda rw panic=-1 bsl.vm=1"
-q = subprocess.Popen(qemu + [
-    "-m", "2048", "-smp", "4", "-kernel", "/w/vmlinuz", "-initrd", "/w/initrd.img", "-append", cmdline,
-    "-drive", "file=/w/root.img,if=virtio,format=raw", "-device", f"vhost-vsock-pci,guest-cid={CID}",
-    "-nic", "none", "-display", "none", "-serial", "file:/w/console.log", "-monitor", "none",
-])
-t0 = time.time()
-up = None
-last = None
-while time.time() - t0 < (120 if ARCH == "arm64" else 900):
+
+
+def boot(label=""):
+    """Starts QEMU on /w/root.img and waits for the agent. Returns the QEMU process."""
+    q = subprocess.Popen(qemu + [
+        "-m", "2048", "-smp", "4", "-kernel", "/w/vmlinuz", "-initrd", "/w/initrd.img", "-append", cmdline,
+        "-drive", "file=/w/root.img,if=virtio,format=raw,discard=unmap", "-device", f"vhost-vsock-pci,guest-cid={CID}",
+        "-nic", "none", "-display", "none", "-serial", f"file:/w/console{label}.log", "-monitor", "none",
+    ])
+    t0 = time.time()
+    up = None
+    last = None
+    while time.time() - t0 < (120 if ARCH == "arm64" else 900):
+        try:
+            out, st = bslvm.simple(args, "p")
+            up = out.decode()
+            break
+        except OSError as e:
+            last = e
+            time.sleep(0.5)
+    check(f"agent answers{label}", up is not None and up.startswith("PONG"), f"{up!r} after {time.time() - t0:.1f}s")
+    if up is None:
+        print("last error:", last)
+        print(open(f"/w/console{label}.log", errors="replace").read()[-3000:])
+        q.kill()
+        sys.exit(1)
+    return q
+
+
+def power_off(q, label=""):
+    bslvm.simple(args, "o", b"poweroff")
     try:
-        out, st = bslvm.simple(args, "p")
-        up = out.decode()
-        break
-    except OSError as e:
-        last = e
-        time.sleep(0.5)
-check("agent answers", up is not None and up.startswith("PONG"), f"{up!r} after {time.time() - t0:.1f}s")
-if up is None:
-    print("last error:", last)
-    print(open("/w/console.log", errors="replace").read()[-3000:])
-    q.kill()
-    sys.exit(1)
+        q.wait(120)
+        check(f"power off{label}", True, f"qemu exit {q.returncode}")
+    except subprocess.TimeoutExpired:
+        q.kill()
+        check(f"power off{label}", False, "qemu still running after 120 s")
+
+
+def stored_mib(path):
+    return os.stat(path).st_blocks * 512 // (1 << 20)
+
+
+q = boot()
 
 out, st = bslvm.simple(args, "i")
 check("info", st == 0 and b"systemd=1" in out, out.decode().replace("\n", " "))
@@ -181,14 +203,36 @@ if os.path.exists("/usr/bin/Xvfb"):
         check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
     xvfb.kill()
 
-# Clean power-off.
-out, st = bslvm.simple(args, "o", b"poweroff")
-try:
-    q.wait(120)
-    check("power off", True, f"qemu exit {q.returncode}")
-except subprocess.TimeoutExpired:
-    q.kill()
-    check("power off", False, "qemu still running after 120 s")
+# The disk grows without losing anything (Android vm/VmDisk.kt): data written now must be there
+# after the app makes the file larger, and the file system must fill the larger disk.
+o, st = run("dd if=/dev/urandom of=/var/tmp/bsl-keep bs=1M count=8 status=none && sha256sum /var/tmp/bsl-keep | cut -d' ' -f1; "
+            "df -B1 --output=size / | tail -1")
+keep_sum, size1 = (o.split() + ["", ""])[:2]
+check("disk: data written before growing", st == 0 and len(keep_sum) == 64, o.strip().replace("\n", " | "))
+
+power_off(q)
+
+if os.environ.get("GROW", "1") == "1":
+    before = os.path.getsize("/w/root.img")
+    stored_before = stored_mib("/w/root.img")
+    # What VmDisk.grow does: the file's length only (ftruncate), while nothing has it open.
+    with open("/w/root.img", "r+b") as f:
+        f.truncate(before + (4 << 30))
+    q = boot(" (grown disk)")
+    o, st = run("sha256sum /var/tmp/bsl-keep | cut -d' ' -f1; df -B1 --output=size / | tail -1; "
+                "systemctl show -p ActiveState --value systemd-growfs-root.service 2>/dev/null || true")
+    parts = o.split()
+    check("disk: data kept after growing", st == 0 and parts[:1] == [keep_sum], o.strip().replace("\n", " | "))
+    grown = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    check("disk: file system grew at boot", grown > int(size1 or 0) + (3 << 30), f"{int(size1 or 0) >> 20} MiB -> {grown >> 20} MiB")
+    # The app's own grow step after the agent answers (VmDisk.GROW_FS_SCRIPT): nothing left to do.
+    GROW_FS = open("/t/grow-fs.sh").read() if os.path.exists("/t/grow-fs.sh") else None
+    if GROW_FS:
+        o, st = run(GROW_FS)
+        check("disk: the app's resize2fs step", st == 0 and ("Nothing to do" in o or "is now" in o), o.strip().replace("\n", " | "))
+    check("disk: growing stored next to nothing", stored_mib("/w/root.img") - stored_before < 512,
+          f"stored {stored_before} -> {stored_mib('/w/root.img')} MiB, length {before >> 20} -> {os.path.getsize('/w/root.img') >> 20} MiB")
+    power_off(q, " (grown disk)")
 
 print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)
