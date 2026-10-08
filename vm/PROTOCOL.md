@@ -60,6 +60,54 @@ a pool of idle channels to port 6000, and each X client is paired with one and c
 no framing. The app connects each channel to its in-process X server when the client's first bytes
 arrive. MIT-SHM and DRI3 cannot cross (a byte relay drops SCM_RIGHTS); clients fall back.
 
+## Bridges: sound, microphone, notifications, clipboard (agent runs, no new port)
+
+The host integration of a VM desktop session (Android `vm/VmBridges.kt`) rides on the agent's `r`
+op: each bridge is a command the app runs in the VM, started after the session script and hung up
+when the session stops. Nothing in the image is specific to them, so a VM system installed before
+they existed gets them with the app. stderr always goes to `/dev/null` or a log: the agent merges it
+into the output, which is the bridge's data.
+
+| Bridge | Runs as | Command | Data |
+|---|---|---|---|
+| sound out | user | `bash`: wait for `127.0.0.1:4713`, then `cat </dev/tcp/127.0.0.1/4713` | output: s16le 48 kHz stereo from PulseAudio's simple protocol (`bsl-audio`), as AudioBridge reads it from TCP in the Standard engine; the app passes whole 4-byte frames only |
+| microphone | user | `[ -p /tmp/bsl-mic.fifo ] && exec cat > /tmp/bsl-mic.fifo` | stdin: s16le 48 kHz mono into PulseAudio's pipe source; exit 3 = no FIFO yet (retried) |
+| notifications, links, rich clipboard | user | `python3 -I -c <assets/vm/bsl-vmbridge.py>` | lines both ways, below |
+
+`/run/bsl/features` is written first with the `f` op: `notify-v2 clipboard-v1`. Programs the app
+starts as the user get `PULSE_SERVER=unix:/tmp/runtime-<user>/pulse/native`, the session's daemon:
+the agent gives them `XDG_RUNTIME_DIR=/run/user/<uid>`, where systemd would socket-activate a second
+PulseAudio with no stream to Android.
+
+`bsl-vmbridge.py` carries the files the Standard engine shares in `/tmp` to a mirror folder in the
+app (`files/vm-share/tmp/`), where the Standard engine's own GuestEventBridge and ClipboardBridge
+run unchanged. One ASCII line per record, payloads base64:
+
+- guest to host: `A <name> <b64>` (what was appended to `/tmp/<name>`: `.bsl-open`, `.bsl-notify`,
+  `.bsl-notify2`, `.bsl-notify-action`; the file is taken by renaming it away), `B <path>` /
+  `D <b64>` (48 KiB at most) / `E` (a whole file, only `.bsl-clip/to-android/<name>`, `clip.json`
+  last), `R 0|1` (`bsl-clipboard` runs).
+- host to guest: `B`/`D`/`E` into `.bsl-clip/to-linux/` or its `files/`, `offer.json` last;
+  `X .bsl-clip/to-linux/files` empties that folder first.
+
+Both ends refuse any other path, write beside the name and rename (never through a link), and the
+host caps a line at 256 KiB and a file at 64 MiB.
+
+## Files: /mnt/host and /mnt/android over SFTP (agent runs)
+
+A custom VM gets no shared directories from Android, so each shared folder is an SFTP version 3
+server in the app (Android `vm/SftpServer.kt`, confined to the folder: paths resolved by name with
+".." stopping at the top, no links made or followed out, NUL refused) and Debian's
+`sshfs -o passive` in the VM, run by the agent as root with the channel as its stdin and stdout
+(`vm/VmFiles.kt` `mountCommand`, copied in `test/mount-share.sh`). Mounted with `allow_other,
+default_permissions,uid=<user>,gid=<user>,dcache_timeout=5`: files show as the Linux user's, folders
+0775 and files 0664 (Android stores no modes; chmod and chown succeed and change nothing). The shell
+around sshfs unmounts on the agent's hangup, so a stopped session leaves no dead mount. /mnt/host is
+the app's shared folder; /mnt/android all of shared storage, only with All files access. An image
+without sshfs gets it from Debian at the first mount (`apt-get install sshfs`; `bake-vm.sh` now
+includes it). Measured: arm64 KVM with OpenSSH's sftp-server as the host, 600-830 MB/s writing and
+610-780 MB/s reading 64 MB; the app's server against Debian's sshfs over pipes, 87 / 143 MB/s.
+
 ## Testing without a device
 
 ```

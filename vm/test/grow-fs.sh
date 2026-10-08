@@ -1,0 +1,1 @@
+dev=$(findmnt -no SOURCE / 2>/dev/null || echo /dev/vda); [ "$(findmnt -no FSTYPE / 2>/dev/null)" = ext4 ] || { echo "root is not ext4"; exit 0; }; resize2fs "$dev" 2>&1 | tail -n 2; df -B1 --output=size,used,avail / | tail -n 1
