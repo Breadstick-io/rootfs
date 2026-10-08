@@ -115,6 +115,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook='echo breadstick-vm > "$1/etc/hostname"; printf "127.0.0.1 localhost\n127.0.1.1 breadstick-vm\n::1 localhost ip6-localhost ip6-loopback\n" > "$1/etc/hosts"' \
   --customize-hook='sed -i "s/^# *en_US.UTF-8/en_US.UTF-8/" "$1/etc/locale.gen"; chroot "$1" locale-gen >/dev/null' \
   --customize-hook='chroot "$1" passwd -l root >/dev/null' \
+  --customize-hook='chroot "$1" systemctl --global mask pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true' \
   --customize-hook="upload '$STAGE/breadstick-archive-keyring.gpg' /usr/share/keyrings/breadstick-archive-keyring.gpg" \
   --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
