@@ -65,13 +65,15 @@ docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/
   chown "$OWNER" /out/*'
 file "$STAGE/bsl-vmagent" | sed 's/^/  /'
 cp "$here"/guest/files/* "$STAGE"/
+cp "$here/../bootstrap/breadstick-archive-keyring.gpg" "$here/../bootstrap/breadstick.sources" "$STAGE"/
 # unshare mode reads it as a mapped uid: it must be somewhere world-readable, not under $HOME.
 cat "$KEYRING" > "$STAGE/debian-archive-keyring.gpg"
 KEYRING="$STAGE/debian-archive-keyring.gpg"
 chmod -R a+rX "$STAGE"
 
-# 2. The system. No recommends; XFCE as the desktop (the session in the VM is plain XFCE until
-#    breadstick-session learns the VM, W8).
+# 2. The system. No recommends; XFCE as the desktop, and with DESKTOP=1 Breadstick's own desktop
+#    (breadstick-desktop from apt.breadstick.io: the look, the shell programs and the session
+#    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
 INCLUDE="systemd-sysv,udev,dbus,dbus-user-session,libpam-systemd,$KPKG,initramfs-tools,kmod,iproute2,nftables,\
 sudo,passwd,ca-certificates,locales,less,nano,procps,psmisc,curl,wget,tmux,openssh-client,bash-completion,python3,\
 apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,\
@@ -111,6 +113,9 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook='echo breadstick-vm > "$1/etc/hostname"; printf "127.0.0.1 localhost\n127.0.1.1 breadstick-vm\n::1 localhost ip6-localhost ip6-loopback\n" > "$1/etc/hosts"' \
   --customize-hook='sed -i "s/^# *en_US.UTF-8/en_US.UTF-8/" "$1/etc/locale.gen"; chroot "$1" locale-gen >/dev/null' \
   --customize-hook='chroot "$1" passwd -l root >/dev/null' \
+  --customize-hook="upload '$STAGE/breadstick-archive-keyring.gpg' /usr/share/keyrings/breadstick-archive-keyring.gpg" \
+  --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
+  --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
   "$SUITE" "$STAGE/root.tar" "$MIRROR"
 
