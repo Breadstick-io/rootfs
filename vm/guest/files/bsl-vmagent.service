@@ -10,6 +10,12 @@ Restart=always
 RestartSec=1
 # Never the out-of-memory killer's pick: a game running Linux out of memory must not cut the app off.
 OOMScoreAdjust=-1000
+# Every program the app starts in the VM (the desktop, Steam, a game) runs in this unit. With
+# systemd's defaults one process killed for memory FAILED the unit and control-group kill mode
+# then ended all of them: Steam's web helper ran out of memory as Fable started, and the whole
+# desktop, Steam and the game went with it (Lenovo, 2026-10-07). The agent resets its programs'
+# oom_score_adj to 0 (bsl-vmagent.c child_exec), so they stay the OOM killer's candidates.
+OOMPolicy=continue
 
 [Install]
 WantedBy=sysinit.target

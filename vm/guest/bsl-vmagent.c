@@ -196,6 +196,12 @@ static int sigpipe_fds[2] = { -1, -1 };
 static void on_sigchld(int s) { (void)s; int e = errno; if (write(sigpipe_fds[1], "c", 1) < 0) {} errno = e; }
 
 static void child_exec(const struct req *r, const struct user *u) {
+    /* The agent runs with OOMScoreAdjust=-1000 (it must outlive any program that runs Linux out of
+     * memory), and oom_score_adj is inherited: put programs back to the ordinary 0, or nothing the
+     * app launched could ever be chosen and an out-of-memory would hang the whole VM. Before the
+     * user switch: raising it back needs no privilege, but do it while still root anyway. */
+    int oom = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
+    if (oom >= 0) { if (write(oom, "0", 1) < 0) { /* best effort */ } close(oom); }
     for (int s = 1; s < NSIG; s++) signal(s, SIG_DFL);
     sigset_t none;
     sigemptyset(&none);
