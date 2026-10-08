@@ -305,6 +305,69 @@ def bridges_test():
     time.sleep(2)
 
 
+def files_test():
+    """The shared folders (Android vm/VmFiles.kt): sshfs -o passive in the VM over an agent run, mounted
+    as the app mounts /mnt/host. The host end here is OpenSSH's sftp-server (the app's own SftpServer is
+    tested against Debian's sshfs on the build machine: SftpServerTest), serving this container, whose
+    /w/share stands in for the app's shared folder."""
+    if not os.path.exists("/usr/lib/openssh/sftp-server"):
+        print("SKIP files (no sftp-server in the test container)")
+        return
+    install = ("command -v sshfs >/dev/null 2>&1 && exit 0; export DEBIAN_FRONTEND=noninteractive; "
+               "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends sshfs 2>&1 | tail -n 3; "
+               "command -v sshfs >/dev/null 2>&1")
+    o, st = run(install)
+    check("files: sshfs present (or installed)", st == 0, o.strip()[-200:])
+    os.makedirs("/w/share", exist_ok=True)
+    with open("/w/share/from-android.txt", "w") as f:
+        f.write("made on Android\n")
+    sftp = subprocess.Popen(["/usr/lib/openssh/sftp-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    s = bslvm.connect(args, bslvm.AGENT_PORT)
+    bslvm.request(s, "r", bslvm.run_payload(open("/t/mount-share.sh").read().strip()))
+
+    def guest_to_server():
+        try:
+            for t, d in bslvm.frames(s):
+                if t == "o":
+                    sftp.stdin.write(d)
+                    sftp.stdin.flush()
+        except (OSError, EOFError, ValueError):
+            pass
+
+    def server_to_guest():
+        try:
+            while True:
+                d = sftp.stdout.read1(65536)
+                if not d:
+                    break
+                bslvm.send_frame(s, "d", d)
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=guest_to_server, daemon=True).start()
+    threading.Thread(target=server_to_guest, daemon=True).start()
+    o, st = run("n=0; while ! mountpoint -q /mnt/host && [ $n -lt 100 ]; do sleep 0.1; n=$((n+1)); done; "
+                "mountpoint /mnt/host; findmnt -no FSTYPE,OPTIONS /mnt/host")
+    check("files: /mnt/host mounted", st == 0 and "fuse.sshfs" in o, o.strip().replace("\n", " | "))
+    o, st = run("cat /mnt/host/w/share/from-android.txt; stat -c %U /mnt/host/w/share/from-android.txt; "
+                "echo hello > /mnt/host/w/share/from-vm.txt && echo wrote", user="tester")
+    check("files: the user reads and writes", "made on Android" in o and "tester" in o and "wrote" in o and
+          open("/w/share/from-vm.txt").read() == "hello\n", o.strip().replace("\n", " | "))
+    o, st = run("t0=$(date +%s%N); dd if=/dev/zero of=/mnt/host/w/share/big bs=1M count=64 conv=fsync status=none; t1=$(date +%s%N); "
+                "echo write $((64000000000 / (t1 - t0))) MB/s; sync; echo 3 > /proc/sys/vm/drop_caches; "
+                "t0=$(date +%s%N); cat /mnt/host/w/share/big >/dev/null; t1=$(date +%s%N); echo read $((64000000000 / (t1 - t0))) MB/s; "
+                "rm /mnt/host/w/share/big")
+    check("files: 64 MB through the mount", st == 0 and "write" in o and "read" in o, o.strip().replace("\n", " | "))
+    # The app closes the channel (Android's close wakes the thread reading it). Here a thread is in
+    # recv() on it, and Linux keeps a socket open under a blocked recv: shutdown is what reaches the VM.
+    s.shutdown(__import__("socket").SHUT_RDWR)
+    s.close()
+    o, st = run("n=0; while mountpoint -q /mnt/host && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done; "
+                "mountpoint -q /mnt/host && echo still-mounted || echo unmounted")
+    check("files: closing the channel unmounts", "unmounted" in o, o.strip())
+    sftp.kill()
+
+
 # The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
 # channels to the guest relay on vsock 6000, the way the app's VmX11Relay does it.
 if os.path.exists("/usr/bin/Xvfb"):
@@ -364,6 +427,8 @@ if os.path.exists("/usr/bin/Xvfb"):
         check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
     bridges_test()
     xvfb.kill()
+
+files_test()
 
 # The disk grows without losing anything (Android vm/VmDisk.kt): data written now must be there
 # after the app makes the file larger, and the file system must fill the larger disk.

@@ -71,12 +71,13 @@ cat "$KEYRING" > "$STAGE/debian-archive-keyring.gpg"
 KEYRING="$STAGE/debian-archive-keyring.gpg"
 chmod -R a+rX "$STAGE"
 
-# 2. The system. No recommends; XFCE as the desktop, and with DESKTOP=1 Breadstick's own desktop
+# 2. The system. sshfs mounts the app's shared folders (vm/PROTOCOL.md "Files").
+#    No recommends; XFCE as the desktop, and with DESKTOP=1 Breadstick's own desktop
 #    (breadstick-desktop from apt.breadstick.io: the look, the shell programs and the session
 #    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
 INCLUDE="systemd-sysv,udev,dbus,dbus-user-session,libpam-systemd,$KPKG,initramfs-tools,kmod,iproute2,nftables,\
 sudo,passwd,ca-certificates,locales,less,nano,procps,psmisc,curl,wget,tmux,openssh-client,bash-completion,python3,\
-apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,systemd-zram-generator,\
+apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,systemd-zram-generator,sshfs,\
 xterm,x11-apps,x11-utils,x11-xserver-utils,xdotool,wmctrl,dbus-x11,fonts-dejavu-core,xauth"
 if [ "$DESKTOP" = 1 ]; then
   INCLUDE="$INCLUDE,xfce4-session,xfwm4,xfce4-panel,xfdesktop4,xfce4-settings,xfconf,thunar,xfce4-terminal,\

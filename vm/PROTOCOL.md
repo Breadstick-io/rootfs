@@ -93,6 +93,21 @@ run unchanged. One ASCII line per record, payloads base64:
 Both ends refuse any other path, write beside the name and rename (never through a link), and the
 host caps a line at 256 KiB and a file at 64 MiB.
 
+## Files: /mnt/host and /mnt/android over SFTP (agent runs)
+
+A custom VM gets no shared directories from Android, so each shared folder is an SFTP version 3
+server in the app (Android `vm/SftpServer.kt`, confined to the folder: paths resolved by name with
+".." stopping at the top, no links made or followed out, NUL refused) and Debian's
+`sshfs -o passive` in the VM, run by the agent as root with the channel as its stdin and stdout
+(`vm/VmFiles.kt` `mountCommand`, copied in `test/mount-share.sh`). Mounted with `allow_other,
+default_permissions,uid=<user>,gid=<user>,dcache_timeout=5`: files show as the Linux user's, folders
+0775 and files 0664 (Android stores no modes; chmod and chown succeed and change nothing). The shell
+around sshfs unmounts on the agent's hangup, so a stopped session leaves no dead mount. /mnt/host is
+the app's shared folder; /mnt/android all of shared storage, only with All files access. An image
+without sshfs gets it from Debian at the first mount (`apt-get install sshfs`; `bake-vm.sh` now
+includes it). Measured: arm64 KVM with OpenSSH's sftp-server as the host, 600-830 MB/s writing and
+610-780 MB/s reading 64 MB; the app's server against Debian's sshfs over pipes, 87 / 143 MB/s.
+
 ## Testing without a device
 
 ```
