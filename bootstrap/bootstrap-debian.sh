@@ -95,6 +95,18 @@ pick_modes() {
     if [ "$(id -u)" = 0 ]; then echo "root"; else echo "unshare fakeroot"; fi
 }
 
+# Debian's security and stable-updates suites, baked in (apt 1.0.38, 2026-11-04): breadstick-desktop
+# needs apt (>= 3.0.4), the fix for CVE-2026-109518, which only the security suite has. Without these
+# lines the bake, and a first install from the base image, could not install breadstick-desktop at all.
+# The session's package-fixups writes the same suites on a running system and leaves them alone when
+# sources.list already names them.
+EXTRA_MIRRORS=()
+case "$SUITE" in
+    sid|unstable|experimental|*-*) ;;
+    *) EXTRA_MIRRORS=("deb https://security.debian.org/debian-security $SUITE-security main"
+                      "deb $MIRROR $SUITE-updates main") ;;
+esac
+
 build() {
     mkdir -p "$OUT_DIR"
     local built=0 m
@@ -113,7 +125,7 @@ build() {
                 --customize-hook="copy-in '$hookdir/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
                 --customize-hook="copy-in '$hookdir/breadstick.sources' /etc/apt/sources.list.d" \
                 --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
-                "$SUITE" "$TARBALL" "$MIRROR"; then
+                "$SUITE" "$TARBALL" "$MIRROR" "${EXTRA_MIRRORS[@]}"; then
             built=1
             log "Base built successfully with mode=${m}"
             break

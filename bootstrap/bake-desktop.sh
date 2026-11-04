@@ -71,6 +71,18 @@ done
 
 INCLUDE="ca-certificates,locales,apt-utils,gnupg,sudo,passwd,ncurses-term,nano,less,procps,openssh-client"
 
+# Debian's security and stable-updates suites, baked in (apt 1.0.38, 2026-11-04): breadstick-desktop
+# needs apt (>= 3.0.4), the fix for CVE-2026-109518, which only the security suite has. Without these
+# lines the bake, and a first install from the base image, could not install breadstick-desktop at all.
+# The session's package-fixups writes the same suites on a running system and leaves them alone when
+# sources.list already names them.
+SECURITY_LINE=""; UPDATES_LINE=""
+case "$SUITE" in
+    sid|unstable|experimental|*-*) ;;
+    *) SECURITY_LINE="deb https://security.debian.org/debian-security $SUITE-security main"
+       UPDATES_LINE="deb $MIRROR $SUITE-updates main" ;;
+esac
+
 log "Baking ${SUITE}/${ARCH} desktop image -> $TARBALL"
 mmdebstrap \
     --mode=unshare \
@@ -85,7 +97,7 @@ mmdebstrap \
     --customize-hook="copy-in '$PROVISION' /root" \
     --customize-hook='chroot "$1" sh /root/provision.sh' \
     --customize-hook='chroot "$1" rm -f /root/provision.sh' \
-    "$SUITE" "$TARBALL" "$MIRROR"
+    "$SUITE" "$TARBALL" "$MIRROR" ${SECURITY_LINE:+"$SECURITY_LINE"} ${UPDATES_LINE:+"$UPDATES_LINE"}
 
 log "Verifying the bake marker + desktop stack in the image..."
 # One listing, reused: each pass decompresses the whole 350 MB image.

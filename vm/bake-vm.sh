@@ -19,6 +19,14 @@ ARCH="${ARCH:-arm64}"
 SUITE="${SUITE:-trixie}"
 DESKTOP="${DESKTOP:-1}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
+# Debian's security and stable-updates suites (apt 1.0.38): breadstick-desktop needs apt (>= 3.0.4),
+# the fix for CVE-2026-109518, which only the security suite has (bootstrap/bake-desktop.sh says the same).
+SECURITY_LINE=""; UPDATES_LINE=""
+case "$SUITE" in
+    sid|unstable|experimental|*-*) ;;
+    *) SECURITY_LINE="deb https://security.debian.org/debian-security $SUITE-security main"
+       UPDATES_LINE="deb $MIRROR $SUITE-updates main" ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 OUT_DIR="${OUT_DIR:-$here/../dist/vm}"
 mkdir -p "$OUT_DIR"
@@ -121,7 +129,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
-  "$SUITE" "$STAGE/root.tar" "$MIRROR"
+  "$SUITE" "$STAGE/root.tar" "$MIRROR" ${SECURITY_LINE:+"$SECURITY_LINE"} ${UPDATES_LINE:+"$UPDATES_LINE"}
 
 # 3. The disk. mke2fs -d keeps ownership only when it runs as root, so the tree is unpacked and
 #    turned into ext4 in a container (Debian 13's e2fsprogs); the kernel and initramfs come out of
