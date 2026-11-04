@@ -118,6 +118,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook='chroot "$1" systemctl --global mask pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true' \
   --customize-hook="upload '$STAGE/breadstick-archive-keyring.gpg' /usr/share/keyrings/breadstick-archive-keyring.gpg" \
   --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
+  --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
   "$SUITE" "$STAGE/root.tar" "$MIRROR"

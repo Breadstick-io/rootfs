@@ -112,6 +112,7 @@ build() {
                 --keyring="$KEYRING" \
                 --customize-hook="copy-in '$hookdir/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
                 --customize-hook="copy-in '$hookdir/breadstick.sources' /etc/apt/sources.list.d" \
+                --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
                 "$SUITE" "$TARBALL" "$MIRROR"; then
             built=1
             log "Base built successfully with mode=${m}"

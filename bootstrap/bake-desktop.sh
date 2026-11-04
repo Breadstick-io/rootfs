@@ -81,6 +81,7 @@ mmdebstrap \
     --keyring="$KEYRING" \
     --customize-hook="copy-in '$HOOKDIR/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
     --customize-hook="copy-in '$SOURCES' /etc/apt/sources.list.d" \
+    --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/$(basename "$SOURCES")\"" \
     --customize-hook="copy-in '$PROVISION' /root" \
     --customize-hook='chroot "$1" sh /root/provision.sh' \
     --customize-hook='chroot "$1" rm -f /root/provision.sh' \
