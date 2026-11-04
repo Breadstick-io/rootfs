@@ -95,16 +95,22 @@ pick_modes() {
     if [ "$(id -u)" = 0 ]; then echo "root"; else echo "unshare fakeroot"; fi
 }
 
-# Debian's security and stable-updates suites, baked in (apt 1.0.38, 2026-11-04): breadstick-desktop
-# needs apt (>= 3.0.4), the fix for CVE-2026-109518, which only the security suite has. Without these
-# lines the bake, and a first install from the base image, could not install breadstick-desktop at all.
-# The session's package-fixups writes the same suites on a running system and leaves them alone when
-# sources.list already names them.
-EXTRA_MIRRORS=()
+# Debian's security and stable-updates suites, as the file the session's package-fixups writes
+# (apt 1.0.38, 2026-11-04): breadstick-desktop needs apt (>= 3.0.4), the fix for CVE-2026-109518,
+# which only the security suite has. Baked before anything installs Breadstick's packages, so the bake
+# and a first install from this image can install it; byte for byte package-fixups' own file, so the
+# session finds it current. Not for sid or a suite with a dash.
+case "$MIRROR" in https://*) DEB_SCHEME=https ;; *) DEB_SCHEME=http ;; esac
+DEBUPD_HOOK=":"
 case "$SUITE" in
     sid|unstable|experimental|*-*) ;;
-    *) EXTRA_MIRRORS=("deb https://security.debian.org/debian-security $SUITE-security main"
-                      "deb $MIRROR $SUITE-updates main") ;;
+    *) DEBUPD_HOOK="printf '%s\\n' '# Breadstick Linux: Debian security fixes and stable updates for $SUITE.' \
+'# Written by /usr/local/lib/breadstick/package-fixups. To keep it out, delete it and' \
+'# create /etc/breadstick/no-debian-updates.' 'Types: deb' 'URIs: $DEB_SCHEME://deb.debian.org/debian' \
+'Suites: $SUITE-updates' 'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' '' \
+'Types: deb' 'URIs: $DEB_SCHEME://security.debian.org/debian-security' 'Suites: $SUITE-security' \
+'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+> \"\$1/etc/apt/sources.list.d/breadstick-debian-updates.sources\"" ;;
 esac
 
 build() {
@@ -124,8 +130,9 @@ build() {
                 --keyring="$KEYRING" \
                 --customize-hook="copy-in '$hookdir/breadstick-archive-keyring.gpg' /usr/share/keyrings" \
                 --customize-hook="copy-in '$hookdir/breadstick.sources' /etc/apt/sources.list.d" \
+                --customize-hook="$DEBUPD_HOOK" \
                 --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
-                "$SUITE" "$TARBALL" "$MIRROR" "${EXTRA_MIRRORS[@]}"; then
+                "$SUITE" "$TARBALL" "$MIRROR"; then
             built=1
             log "Base built successfully with mode=${m}"
             break

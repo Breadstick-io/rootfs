@@ -19,13 +19,22 @@ ARCH="${ARCH:-arm64}"
 SUITE="${SUITE:-trixie}"
 DESKTOP="${DESKTOP:-1}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
-# Debian's security and stable-updates suites (apt 1.0.38): breadstick-desktop needs apt (>= 3.0.4),
-# the fix for CVE-2026-109518, which only the security suite has (bootstrap/bake-desktop.sh says the same).
-SECURITY_LINE=""; UPDATES_LINE=""
+# Debian's security and stable-updates suites, as the file the session's package-fixups writes
+# (apt 1.0.38, 2026-11-04): breadstick-desktop needs apt (>= 3.0.4), the fix for CVE-2026-109518,
+# which only the security suite has. Baked before anything installs Breadstick's packages, so the bake
+# and a first install from this image can install it; byte for byte package-fixups' own file, so the
+# session finds it current. Not for sid or a suite with a dash.
+case "$MIRROR" in https://*) DEB_SCHEME=https ;; *) DEB_SCHEME=http ;; esac
+DEBUPD_HOOK=":"
 case "$SUITE" in
     sid|unstable|experimental|*-*) ;;
-    *) SECURITY_LINE="deb https://security.debian.org/debian-security $SUITE-security main"
-       UPDATES_LINE="deb $MIRROR $SUITE-updates main" ;;
+    *) DEBUPD_HOOK="printf '%s\\n' '# Breadstick Linux: Debian security fixes and stable updates for $SUITE.' \
+'# Written by /usr/local/lib/breadstick/package-fixups. To keep it out, delete it and' \
+'# create /etc/breadstick/no-debian-updates.' 'Types: deb' 'URIs: $DEB_SCHEME://deb.debian.org/debian' \
+'Suites: $SUITE-updates' 'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' '' \
+'Types: deb' 'URIs: $DEB_SCHEME://security.debian.org/debian-security' 'Suites: $SUITE-security' \
+'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+> \"\$1/etc/apt/sources.list.d/breadstick-debian-updates.sources\"" ;;
 esac
 here=$(cd "$(dirname "$0")" && pwd)
 OUT_DIR="${OUT_DIR:-$here/../dist/vm}"
@@ -126,10 +135,11 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook='chroot "$1" systemctl --global mask pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true' \
   --customize-hook="upload '$STAGE/breadstick-archive-keyring.gpg' /usr/share/keyrings/breadstick-archive-keyring.gpg" \
   --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
+  --customize-hook="$DEBUPD_HOOK" \
   --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
-  "$SUITE" "$STAGE/root.tar" "$MIRROR" ${SECURITY_LINE:+"$SECURITY_LINE"} ${UPDATES_LINE:+"$UPDATES_LINE"}
+  "$SUITE" "$STAGE/root.tar" "$MIRROR"
 
 # 3. The disk. mke2fs -d keeps ownership only when it runs as root, so the tree is unpacked and
 #    turned into ext4 in a container (Debian 13's e2fsprogs); the kernel and initramfs come out of
