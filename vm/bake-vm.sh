@@ -101,6 +101,10 @@ KEYRING="$STAGE/debian-archive-keyring.gpg"
 chmod -R a+rX "$STAGE"
 
 # 2. The system. sshfs mounts the app's shared folders (vm/PROTOCOL.md "Files").
+#    While Breadstick's packages install, the chroot's /run/bsl/engine says "vm": their
+#    /usr/lib/breadstick/bsl-engine (packages vm-3.2) reads it, and in a plain chroot it would answer
+#    "proot" and apply proot-only fixups (clearing executable stacks) to a VM image. Removed before
+#    the disk is made; in the VM /run is a tmpfs and the app writes the file through the agent.
 #    No recommends; XFCE as the desktop, and with DESKTOP=1 Breadstick's own desktop
 #    (breadstick-desktop from apt.breadstick.io: the look, the shell programs and the session
 #    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
@@ -149,8 +153,10 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
   --customize-hook="$DEBUPD_HOOK" \
   --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
+  --customize-hook='mkdir -p "$1/run/bsl" && echo vm > "$1/run/bsl/engine"' \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
+  --customize-hook='rm -f "$1/run/bsl/engine"; rmdir "$1/run/bsl" 2>/dev/null || true' \
   "$SUITE" "$STAGE/root.tar" "$MIRROR"
 
 # 3. The disk. mke2fs -d keeps ownership only when it runs as root, so the tree is unpacked and
