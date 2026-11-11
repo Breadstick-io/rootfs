@@ -144,6 +144,92 @@ check("apt-get update", st == 0 and "Reading package lists" in o and "Err" not i
 o, st = run("DEBIAN_FRONTEND=noninteractive apt-get install -y -q cowsay >/dev/null 2>&1 && /usr/games/cowsay moo | tail -1")
 check("apt-get install", st == 0, o.strip())
 
+
+def share_open():
+    """/mnt/host in the VM = this container's / (OpenSSH's sftp-server over an agent channel, as the
+    app's VmFiles does with its own server). Returns (channel, server) once mounted, or None."""
+    if not os.path.exists("/usr/lib/openssh/sftp-server"):
+        return None
+    sftp = subprocess.Popen(["/usr/lib/openssh/sftp-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    s = bslvm.connect(args, bslvm.AGENT_PORT)
+    bslvm.request(s, "r", bslvm.run_payload(open("/t/mount-share.sh").read().strip()))
+
+    def guest_to_server():
+        try:
+            for t, d in bslvm.frames(s):
+                if t == "o":
+                    sftp.stdin.write(d)
+                    sftp.stdin.flush()
+        except (OSError, EOFError, ValueError):
+            pass
+
+    def server_to_guest():
+        try:
+            while True:
+                d = sftp.stdout.read1(65536)
+                if not d:
+                    break
+                bslvm.send_frame(s, "d", d)
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=guest_to_server, daemon=True).start()
+    threading.Thread(target=server_to_guest, daemon=True).start()
+    o, st = run("n=0; while ! mountpoint -q /mnt/host && [ $n -lt 100 ]; do sleep 0.1; n=$((n+1)); done; mountpoint -q /mnt/host")
+    if st != 0:
+        sftp.kill()
+        return None
+    return s, sftp
+
+
+def share_close(h):
+    s, sftp = h
+    s.shutdown(__import__("socket").SHUT_RDWR)
+    s.close()
+    run("n=0; while mountpoint -q /mnt/host && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done")
+    sftp.kill()
+
+
+def staged_upgrade():
+    """The gate's VM stage (AutoBuild test/gate.sh, VM=1): the image upgraded from a STAGED repo the
+    way an installed system upgrades from apt.breadstick.io (apt-get install breadstick-desktop), before
+    the session tests below run on the result. The stage is mounted at /repo in this container
+    (qemu-test.sh STAGED_REPO=) and reaches the VM as /mnt/host/repo."""
+    suite = os.environ.get("STAGED_SUITE", "breadstick")
+    pool = "pool/test" if suite == "breadstick-test" else "pool/main"
+    want = None
+    for f in sorted(os.listdir("/repo/" + pool)):
+        if f.startswith("breadstick-desktop_") and f.endswith("_all.deb"):
+            want = f.split("_")[1]
+    check("staged: the stage has breadstick-desktop", want is not None, f"/repo/{pool}")
+    if want is None:
+        return
+    o, _ = run("dpkg-query -W -f='${Version}' breadstick-desktop")
+    before = o.strip()
+    h = share_open()
+    check("staged: the stage reaches the VM", h is not None)
+    if h is None:
+        return
+    script = (f"set -e; echo 'deb [trusted=yes] file:/mnt/host/repo {suite} main' > /etc/apt/sources.list.d/zz-gate.list; "
+              "export DEBIAN_FRONTEND=noninteractive; apt-get -o DPkg::Lock::Timeout=180 update >/tmp/gate-update.log 2>&1; "
+              "apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends breadstick-desktop >/tmp/gate-install.log 2>&1; "
+              "echo installed")
+    o, st = run(script)
+    tail, _ = run("tail -n 4 /tmp/gate-install.log")
+    check("staged: apt-get install breadstick-desktop", st == 0 and "installed" in o, tail.strip().replace("\n", " | "))
+    o, _ = run("dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\\n' 'breadstick-*' | awk '$3 == \"ii\"'")
+    rows = [l.split() for l in o.strip().splitlines() if l.strip()]
+    stale = [r[0] + " " + r[1] for r in rows if r[1] != want]
+    check(f"staged: breadstick-* {before} -> {want}", rows and not stale, ", ".join(stale) or f"{len(rows)} packages at {want}")
+    o, st = run("dpkg --audit; echo rc=$?")
+    check("staged: dpkg --audit clean", o.strip() == "rc=0", o.strip().replace("\n", " | "))
+    run("rm -f /etc/apt/sources.list.d/zz-gate.list; apt-get update >/dev/null 2>&1 || true")
+    share_close(h)
+
+
+if os.path.isdir("/repo"):
+    staged_upgrade()
+
 class Chan:
     """An agent 'r' run kept open: stdin sent as it comes, output gathered by a thread (bytes)."""
 
@@ -305,6 +391,36 @@ def bridges_test():
     time.sleep(2)
 
 
+def desktop_test():
+    """The session in Desktop mode (whole screen, XFCE), as the app starts it in the VM:
+    LinuxEnvironment.desktopSessionScript(0, rootless=false, vm=true)."""
+    o, st = run("[ -f /usr/lib/breadstick/start-desktop-x11.sh ] || exit 77")
+    if st == 77:
+        print("SKIP desktop session (no breadstick-session in this image)")
+        return
+    o, _ = run("pgrep -u tester -x xfce4-session || true")
+    old = set(o.split())
+    session = Chan("export BREADSTICK_WAYLAND=0 BREADSTICK_COMPOSITOR=0 BREADSTICK_DARK=0 BREADSTICK_LOCALE=en_US.UTF-8 "
+                   "BREADSTICK_DPI=96 BREADSTICK_GPU=0; export BREADSTICK_VOLUMES=''; "
+                   "F=/usr/lib/breadstick/start-desktop-x11.sh; sh \"$F\" 0 tester 0",
+                   env=["DISPLAY=:0", "NO_AT_BRIDGE=1", "LIBGL_KOPPER_DISABLE=1", "BREADSTICK_ROOTLESS=0"])
+    up = session.lines(120, lambda l: "starting XFCE" in l)
+    check("desktop: session up (Desktop)", any("starting XFCE" in l for l in up), " | ".join(up[-6:]))
+    new, shown = set(), ""
+    for _ in range(40):
+        time.sleep(1.5)
+        o, _ = run("pgrep -u tester -x xfce4-session || true")
+        new = set(o.split()) - old
+        w, _ = run("DISPLAY=:0 xwininfo -root -children 2>/dev/null | grep -c -E 'xfce4-panel|xfdesktop|Xfwm4'", user="tester")
+        shown = w.strip()
+        if new and shown not in ("", "0"):
+            break
+    check("desktop: XFCE runs and draws (Desktop)", bool(new) and shown not in ("", "0"),
+          f"new xfce4-session {sorted(new)}, {shown} shell windows on the screen")
+    session.close()
+    time.sleep(2)
+
+
 def files_test():
     """The shared folders (Android vm/VmFiles.kt): sshfs -o passive in the VM over an agent run, mounted
     as the app mounts /mnt/host. The host end here is OpenSSH's sftp-server (the app's own SftpServer is
@@ -428,6 +544,7 @@ if os.path.exists("/usr/bin/Xvfb"):
     else:
         check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
     bridges_test()
+    desktop_test()
     xvfb.kill()
 
 files_test()
