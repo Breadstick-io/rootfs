@@ -10,8 +10,8 @@
 #
 # Output, in $OUT_DIR (default rootfs/dist/vm), named by stamp so a published copy never changes:
 #   debian-trixie-<arch>-vm-<stamp>/{vmlinuz, initrd.img, root.img.zst, image.json}
-#   manifest-vm-<arch>.json   the shape the app reads from cdn.breadstick.io/rootfs/ (NOT published
-#                             by this script; AutoBuild/deploy/rootfs-image.sh does not know it yet)
+#   manifest-vm-<arch>.json   the shape the app reads from cdn.breadstick.io/rootfs/ (published by
+#                             AutoBuild/deploy/vm-image.sh, which rebuilds it from image.json)
 # The app writes root.img sparse, extends it, and systemd grows the file system at first boot.
 set -eu
 
@@ -71,7 +71,19 @@ STAGE=$(mktemp -d "${TMPDIR:-/tmp}/bsl-vm-stage.XXXXXX")
 chmod 1777 "$STAGE"
 trap 'rm -rf "$STAGE"' EXIT
 log "building guest programs for $ARCH"
-docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/guest:/src:ro" -v "$STAGE:/out" "debian:$SUITE" sh -ec '
+# A foreign architecture runs from its own tag (AutoBuild tools/qemu-x86_64-setup.sh, 2026-10-25):
+# `docker run --platform linux/amd64 debian:trixie` on this arm64 host re-pulls debian:trixie AS
+# amd64, and every later native user of that tag (this script's own disk step, the gate, other
+# builds) then runs under qemu, or fails once binfmt is gone. Seen again on the 2026-11-10 bake.
+HOST_ARCH=$(dpkg --print-architecture)
+GUEST_IMG="debian:$SUITE"
+if [ "$ARCH" != "$HOST_ARCH" ]; then
+  GUEST_IMG="bsl-debian-$SUITE:$ARCH"
+  docker image inspect "$GUEST_IMG" >/dev/null 2>&1 || {
+    docker pull -q --platform "linux/$ARCH" "debian:$SUITE" >/dev/null && docker tag "debian:$SUITE" "$GUEST_IMG" &&
+      docker pull -q --platform "linux/$HOST_ARCH" "debian:$SUITE" >/dev/null; }
+fi
+docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/guest:/src:ro" -v "$STAGE:/out" "$GUEST_IMG" sh -ec '
   apt-get update -qq >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
   for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do
@@ -145,7 +157,7 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
 #    turned into ext4 in a container (Debian 13's e2fsprogs); the kernel and initramfs come out of
 #    the same tree. Native container: this step only moves data.
 log "making the ext4 disk"
-docker run --rm --platform "linux/$(dpkg --print-architecture)" -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
+docker run --rm --platform "linux/$HOST_ARCH" -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
   command -v mke2fs >/dev/null || { apt-get update -qq >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq e2fsprogs >/dev/null; }
   mkdir /r
   tar -C /r --numeric-owner -xpf /s/root.tar
