@@ -9,14 +9,22 @@
 #   1. The Remix swap: breadstick-release, from Breadstick's repository with gpgcheck=1 and repo_gpgcheck=1 against
 #      the archive key (bootstrap/RPM-GPG-KEY-breadstick, its fingerprint checked first), replaces every
 #      fedora-release* package and fedora-logos in one transaction (dnf install --allowerasing).
-#   2. dnf upgrade --refresh: the release's updates repository, security fixes included.
+#   2. Documentation and every language, as Debian's images have them: Fedora's container image installs neither
+#      (tsflags=nodocs in /etc/dnf/dnf.conf, %_install_langs en_US in /etc/rpm/macros.image-language-conf), and a
+#      system made from it would never install them for anything added later. Both settings go (dnf.conf is then
+#      libdnf5's own file again), then dnf upgrade --refresh: the release's updates repository, security fixes
+#      included.
 #   3. The base set (what bootstrap-debian.sh's INCLUDE gives Debian): sudo, passwd, ncurses-term, nano, less,
 #      procps-ng, openssh-clients, tmux, curl, gnupg2, ca-certificates, glibc-langpack-en. No weak dependencies, as
-#      the app installs.
+#      the app installs. Then every package the container image installed without some of its files (rpm's file
+#      state "not installed": its documentation and translations) is reinstalled, and none may be left.
 #   4. desktop: breadstick-desktop, then a browser through Breadstick's own install-browser.sh with no choice (its
 #      default, Chromium; the owner: the image ships a browser), and the desktop-ok marker the app looks for.
 #   5. sudo 4755 (Fedora ships 4111, which proot's fake root cannot read to run: plan section 11) and /root 0700
-#      (Fedora's is 0550, which a fake root cannot write); the package database, caches and logs cleaned.
+#      (Fedora's is 0550, which a fake root cannot write); the package database, caches, logs, /tmp and /var/tmp
+#      cleaned. /etc/machine-id is emptied and systemd's random seed removed (systemd's scriptlets write both during
+#      the bake): every device made from the image would otherwise share one machine-id, and the session gives a
+#      device its own only when the file is empty, as in Debian's images.
 # No proot shims are installed (Debian's provision.sh puts systemctl/systemd-tmpfiles stubs and a sysusers shim in
 # /usr/local/bin and /usr/bin): rpm runs scriptlets with PATH=/sbin:/bin:/usr/sbin:/usr/bin, so /usr/local/bin is
 # never seen, and stubs over /usr/bin would be files of systemd's package (rpm -V fails, every systemd update puts
@@ -115,11 +123,21 @@ if [ "$STEP" = base ]; then
         # A local test image: the repository is the stage, at the path it is mounted on.
         sed -i "s|^baseurl=.*|baseurl=$BSL/fedora/\$releasever/\$basearch/|" /etc/yum.repos.d/breadstick.repo
     fi
-    echo "[bake] 2. dnf upgrade --refresh"
+    echo "[bake] 2. documentation and every language, then dnf upgrade --refresh"
+    sed -i '/^tsflags=nodocs$/d' /etc/dnf/dnf.conf
+    rm -f /etc/rpm/macros.image-language-conf
+    ! grep -q '^tsflags' /etc/dnf/dnf.conf || { echo "dnf.conf still has tsflags: $(grep '^tsflags' /etc/dnf/dnf.conf)" >&2; exit 1; }
+    [ "$(rpm -E %_install_langs)" = all ] || { echo "rpm installs only these languages: $(rpm -E %_install_langs)" >&2; exit 1; }
     $D upgrade --refresh
     echo "[bake] 3. the base set"
     $D install sudo passwd shadow-utils ncurses-term nano less procps-ng openssh-clients tmux curl gnupg2 \
         ca-certificates glibc-langpack-en
+    left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\n]' | sed -n 's/^not installed\t//p' | sort -u)
+    if [ -n "$left" ]; then
+        echo "[bake] 3. reinstalling $(echo "$left" | wc -l) packages the container image installed without their documentation or translations"
+        # shellcheck disable=SC2086
+        $D reinstall $left
+    fi
 else
     echo "[bake] 4. breadstick-desktop and a browser"
     $D upgrade --refresh
@@ -142,8 +160,14 @@ chmod 4755 /usr/bin/sudo
 chmod 0700 /root
 left=$(rpm -qa 'fedora-release*' 'fedora-logos*' 'fedora-release-notes*')
 [ -z "$left" ] || { echo "Fedora's branding came back: $left" >&2; exit 1; }
+left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\t%{FILENAMES}\n]' | grep '^not installed' || true)
+[ -z "$left" ] || { echo "files rpm left out (documentation or translations): $(echo "$left" | head -n 5)" >&2; exit 1; }
+# No machine-id or random seed of the bake's own: each device makes its own (the session, when the file is empty).
+: > /etc/machine-id
+rm -f /var/lib/systemd/random-seed
 dnf -q clean all
-rm -rf /var/cache/dnf/* /var/cache/libdnf5/* /var/log/dnf* /var/lib/dnf/repos/* /tmp/* /var/tmp/* /root/.cache
+rm -rf /var/cache/dnf/* /var/cache/libdnf5/* /var/log/dnf* /var/lib/dnf/repos/* /root/.cache \
+    /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]*
 echo "[bake] $STEP done: $(rpm -qa | wc -l) packages"
 BSL_FEDORA_BAKE_7d41
 
@@ -196,9 +220,14 @@ export_image() {  # $1 = container, $2 = tarball
 
 # Each image, checked as a device would get it: the listing (modes as written), then the image imported into Docker
 # and run with no network (the stage mounted where the image's repository names it), never unpacked on this host.
-cp "$ROOT/../packages/breadstick-session/src/lib/bsl-os.sh" "$WORK/bsl-os.sh" 2>/dev/null \
-  || cp "${PKGROOT:-/nonexistent}/breadstick-session/src/lib/bsl-os.sh" "$WORK/bsl-os.sh" 2>/dev/null \
-  || { echo "ERROR: no bsl-os.sh (set PKGROOT= to the packages tree)" >&2; exit 1; }
+# The base image has no Breadstick package, so its family check runs bsl-os.sh from a packages tree: PKGROOT when it
+# is set (the release-4.0 tree the stage was built from), else the packages checkout beside this one, whatever it has
+# checked out. Which one, and its commit, is printed.
+BSLOS_TREE="${PKGROOT:-$ROOT/../packages}"
+[ -f "$BSLOS_TREE/breadstick-session/src/lib/bsl-os.sh" ] \
+  || { echo "ERROR: no bsl-os.sh in $BSLOS_TREE (set PKGROOT= to the packages tree)" >&2; exit 1; }
+cp "$BSLOS_TREE/breadstick-session/src/lib/bsl-os.sh" "$WORK/bsl-os.sh"
+log "the base image's bsl-os.sh: $BSLOS_TREE ($(git -C "$BSLOS_TREE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?') $(git -C "$BSLOS_TREE" rev-parse --short HEAD 2>/dev/null || echo '?'))"
 cat > "$WORK/check.sh" <<'BSL_FEDORA_CHECK_7d41'
 set -u
 FLAVOR=$1 REL=$2 STAGED=$3
@@ -227,6 +256,14 @@ check "rpm -V sudo: clean but for the mode of /usr/bin/sudo (4755 in place of Fe
     'rpm -V --nomode sudo && rpm -V sudo > /tmp/v; test "$(wc -l < /tmp/v)" = 1 && grep -Eq "^\.M\.{7} +/usr/bin/sudo$" /tmp/v'
 check "/root is 0700" test "$(stat -c %a /root)" = 700
 check "bsl-os.sh: family fedora" sh -c '. "${BSLOS:-/usr/lib/breadstick/bsl-os.sh}"; test "$(bsl_os_family)" = fedora'
+check "/etc/machine-id is empty and there is no random seed (each device makes its own)" sh -c \
+    'test -f /etc/machine-id && test ! -s /etc/machine-id && test ! -e /var/lib/systemd/random-seed'
+check "documentation and every language: no tsflags in dnf.conf, %_install_langs all" sh -c \
+    '! grep -q "^tsflags" /etc/dnf/dnf.conf && test ! -e /etc/rpm/macros.image-language-conf && test "$(rpm -E %_install_langs)" = all'
+check "no file rpm left out (file state 'not installed'): documentation and translations are on disk" sh -c \
+    '! rpm -qa --qf "[%{FILESTATES:fstate} %{=NAME} %{FILENAMES}\n]" | grep "^not installed"'
+check "bash's man page and a translation are installed" sh -c \
+    'rpm -qd bash | grep -q "/man1/bash\.1" && test -e "$(rpm -qd bash | grep "/man1/bash\.1" | head -n 1)" && rpm -ql bash | grep -q "^/usr/share/locale/de/LC_MESSAGES/bash\.mo$" && test -e /usr/share/locale/de/LC_MESSAGES/bash.mo'
 if [ "$FLAVOR" = desktop ]; then
     check "breadstick-desktop installed, from the Breadstick repository" sh -c \
         'test "$(dnf -q repoquery --installed --qf "%{from_repo}" breadstick-desktop)" = breadstick'
@@ -237,6 +274,12 @@ if [ "$FLAVOR" = desktop ]; then
         "! rpm -qa --qf '%{NAME} %{RSAHEADER:pgpsig}\n' 'breadstick-*' | grep -vi f02a2d085ac691bc"
 fi
 check "every installed package's dependencies hold (rpm -Va --nofiles)" rpm -Va --nofiles --nodigest --nosignature
+if [ "$FLAVOR" = desktop ]; then
+    # Last, as it writes a machine-id: the session's own two lines give this device an id of its own.
+    grep -E '^\[ -s /(etc|var/lib/dbus)/machine-id \]' /usr/lib/breadstick/start-desktop-x11.sh > /tmp/mid.sh
+    check "the session's machine-id lines make one for this device" sh -c \
+        'test "$(wc -l < /tmp/mid.sh)" = 2 && sh /tmp/mid.sh && grep -Eqx "[0-9a-f]{32}" /etc/machine-id && test "$(cat /var/lib/dbus/machine-id)" = "$(cat /etc/machine-id)"'
+fi
 echo "$FLAVOR: $fails failed"
 [ "$fails" -eq 0 ]
 BSL_FEDORA_CHECK_7d41
@@ -250,6 +293,10 @@ verify_image() {  # $1 = base|desktop, $2 = tarball
   ! grep -Eq ' (\./)?(\.dockerenv|bsl-stage|bsl-key|bake\.sh|etc/hostname|etc/resolv\.conf|etc/hosts\.bsl-setup)(/|$)' "$WORK/list" \
     || { echo "ERROR: Docker's files are in the image" >&2; exit 1; }
   grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* (\./)?etc/hosts$' "$WORK/list" || { echo "ERROR: /etc/hosts is not the setup package's" >&2; exit 1; }
+  grep -Eq '^-rw-r--r-- (root/root|0/0) +0 .* (\./)?etc/machine-id$' "$WORK/list" || { echo "ERROR: /etc/machine-id is not empty in the listing" >&2; exit 1; }
+  ! grep -Eq ' (\./)?(var/lib/systemd/random-seed|var/lib/systemd/credential\.secret|etc/ssh/ssh_host_[^ ]*)$' "$WORK/list" \
+    || { echo "ERROR: the image carries a random seed, a credential secret or SSH host keys of the bake's own" >&2; exit 1; }
+  ! grep -Eq ' (\./)?(var/)?tmp/[^ ]+' "$WORK/list" || { echo "ERROR: /tmp or /var/tmp is not empty in the listing" >&2; exit 1; }
   rm -f "$WORK/list"
   IMAGES+=("$img")
   zstd -dc "$t" | docker import --platform "linux/$ARCH" - "$img" >/dev/null
