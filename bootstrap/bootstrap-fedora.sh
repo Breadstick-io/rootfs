@@ -24,7 +24,8 @@
 #      (Fedora's is 0550, which a fake root cannot write); the package database, caches, logs, /tmp and /var/tmp
 #      cleaned. /etc/machine-id is emptied and systemd's random seed removed (systemd's scriptlets write both during
 #      the bake): every device made from the image would otherwise share one machine-id, and the session gives a
-#      device its own only when the file is empty, as in Debian's images.
+#      device its own only when the file is empty, as in Debian's images. KIWI's build files, which Fedora's container
+#      image carries and no package owns (/.profile with its kiwi_* settings, /etc/fstab.script), are removed.
 # No proot shims are installed (Debian's provision.sh puts systemctl/systemd-tmpfiles stubs and a sysusers shim in
 # /usr/local/bin and /usr/bin): rpm runs scriptlets with PATH=/sbin:/bin:/usr/sbin:/usr/bin, so /usr/local/bin is
 # never seen, and stubs over /usr/bin would be files of systemd's package (rpm -V fails, every systemd update puts
@@ -32,7 +33,12 @@
 #
 # The image is the container's filesystem (docker export), minus Docker's own files (/.dockerenv, the stage's mount
 # point), in dist/ (git-ignored): fedora-<release>-<arch>[-desktop]-<stamp>.tar.zst, zstd level 19 like the Debian
-# images. Each image is checked after it is written (below).
+# images. Each image is checked after it is written (below), its size first: Cloudflare caches a file only up to
+# 512 MB (plan 5.4), so an image at or over 512,000,000 bytes is refused (renamed <name>.rejected, the bake fails).
+# OVER_CACHE_LIMIT=keep keeps such an image under its own name, checked like any other, with a warning that it would
+# be served uncached: for local measurement only, the owner's call before anything like it is published.
+# An image is written as <name>.unchecked and gets its name only when every check has passed; one that fails a check
+# is renamed <name>.rejected. dist/ never holds an unchecked or failed image under a good name.
 #
 # RPM_STAGE: until rpm.breadstick.io serves packages, a local stage made by Apt/rpm/stage-rpm-repo.sh is the only
 # repository there is. It is mounted read-only at /bsl-stage and the image's breadstick.repo points at
@@ -58,6 +64,10 @@ OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 STAMP="${STAMP:-$(date -u +%Y%m%d%H%M)}"
 case "$STAMP" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "ERROR: STAMP must be YYYYMMDDHHMM" >&2; exit 1 ;; esac
 LEVEL="${BAKE_ZSTD_LEVEL:-19}"
+case "${OVER_CACHE_LIMIT:-}" in ''|keep) ;; *) echo "ERROR: OVER_CACHE_LIMIT is keep or unset" >&2; exit 1 ;; esac
+# shellcheck source=fedora-image-checks.sh
+. "$HERE/fedora-image-checks.sh"
+[ "$BSL_CACHE_LIMIT" -le 512000000 ] 2>/dev/null || { echo "ERROR: BSL_CACHE_LIMIT may only lower the 512,000,000-byte limit" >&2; exit 1; }
 KEY="$HERE/RPM-GPG-KEY-breadstick"
 FPR=EABBC4B5F0BD78B405AF005FF02A2D085AC691BC
 log() { printf '\033[1;34m[bake-fedora]\033[0m %s\n' "$*"; }
@@ -165,6 +175,14 @@ left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\t%{FILENAMES}\n]' | grep '^
 # No machine-id or random seed of the bake's own: each device makes its own (the session, when the file is empty).
 : > /etc/machine-id
 rm -f /var/lib/systemd/random-seed
+# KIWI's leftovers in Fedora's container image (the tool that builds it; no package owns them): removed when they are
+# unowned and KIWI's. Anything else unowned at those paths is not known, and the bake stops.
+for f in /.profile /.kconfig /etc/fstab.script; do
+    [ -e "$f" ] || continue
+    if rpm -qf "$f" >/dev/null 2>&1; then echo "$f belongs to $(rpm -qf "$f"): left alone"; continue; fi
+    grep -q kiwi "$f" || { echo "$f is unowned and not KIWI's" >&2; exit 1; }
+    rm -f "$f"
+done
 dnf -q clean all
 rm -rf /var/cache/dnf/* /var/cache/libdnf5/* /var/log/dnf* /var/lib/dnf/repos/* /root/.cache \
     /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]*
@@ -215,7 +233,7 @@ export_image() {  # $1 = container, $2 = tarball
   [ -s "$WORK/hosts" ] || { echo "ERROR: no copy of the setup package's /etc/hosts in $1" >&2; exit 1; }
   docker export "$1" | python3 -I "$WORK/filter.py" "$WORK/hosts" | zstd -q -"$LEVEL" -T0 -o "$2.part"
   zstd -q -t "$2.part"
-  mv -f "$2.part" "$2"
+  mv -f "$2.part" "$2.unchecked"
 }
 
 # Each image, checked as a device would get it: the listing (modes as written), then the image imported into Docker
@@ -256,6 +274,7 @@ check "rpm -V sudo: clean but for the mode of /usr/bin/sudo (4755 in place of Fe
     'rpm -V --nomode sudo && rpm -V sudo > /tmp/v; test "$(wc -l < /tmp/v)" = 1 && grep -Eq "^\.M\.{7} +/usr/bin/sudo$" /tmp/v'
 check "/root is 0700" test "$(stat -c %a /root)" = 700
 check "bsl-os.sh: family fedora" sh -c '. "${BSLOS:-/usr/lib/breadstick/bsl-os.sh}"; test "$(bsl_os_family)" = fedora'
+check "no KIWI build files (/.profile, /.kconfig, /etc/fstab.script)" sh -c 'test ! -e /.profile && test ! -e /.kconfig && test ! -e /etc/fstab.script'
 check "/etc/machine-id is empty and there is no random seed (each device makes its own)" sh -c \
     'test -f /etc/machine-id && test ! -s /etc/machine-id && test ! -e /var/lib/systemd/random-seed'
 check "documentation and every language: no tsflags in dnf.conf, %_install_langs all" sh -c \
@@ -284,19 +303,25 @@ echo "$FLAVOR: $fails failed"
 [ "$fails" -eq 0 ]
 BSL_FEDORA_CHECK_7d41
 
-verify_image() {  # $1 = base|desktop, $2 = tarball
-  local t="$2" v="bsl-fedora-verify-$1-$ARCH-$$" img="bsl-fedora-verify:$1-$ARCH-$STAMP-$$"
-  log "checking $(basename "$t")"
-  zstd -dc "$t" | tar tvf - > "$WORK/list" 2>/dev/null
-  grep -Eq '^-rwsr-xr-x (root/root|0/0) .* (\./)?usr/bin/sudo$' "$WORK/list" || { echo "ERROR: sudo is not 4755 root in the listing" >&2; exit 1; }
-  grep -Eq '^drwx------ (root/root|0/0) .* (\./)?root/?$' "$WORK/list" || { echo "ERROR: /root is not 0700 in the listing" >&2; exit 1; }
-  ! grep -Eq ' (\./)?(\.dockerenv|bsl-stage|bsl-key|bake\.sh|etc/hostname|etc/resolv\.conf|etc/hosts\.bsl-setup)(/|$)' "$WORK/list" \
-    || { echo "ERROR: Docker's files are in the image" >&2; exit 1; }
-  grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* (\./)?etc/hosts$' "$WORK/list" || { echo "ERROR: /etc/hosts is not the setup package's" >&2; exit 1; }
-  grep -Eq '^-rw-r--r-- (root/root|0/0) +0 .* (\./)?etc/machine-id$' "$WORK/list" || { echo "ERROR: /etc/machine-id is not empty in the listing" >&2; exit 1; }
-  ! grep -Eq ' (\./)?(var/lib/systemd/random-seed|var/lib/systemd/credential\.secret|etc/ssh/ssh_host_[^ ]*)$' "$WORK/list" \
-    || { echo "ERROR: the image carries a random seed, a credential secret or SSH host keys of the bake's own" >&2; exit 1; }
-  ! grep -Eq ' (\./)?(var/)?tmp/[^ ]+' "$WORK/list" || { echo "ERROR: /tmp or /var/tmp is not empty in the listing" >&2; exit 1; }
+reject() {  # $1 = the image as written (<name>.unchecked), $2 = why: it becomes <name>.rejected, and the bake fails
+  mv -f "$1" "${1%.unchecked}.rejected"
+  echo "ERROR: $2; the image is now $(basename "${1%.unchecked}").rejected" >&2
+  exit 1
+}
+OVER_LIMIT=()
+verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes)
+  local t="$2.unchecked" v="bsl-fedora-verify-$1-$ARCH-$$" img="bsl-fedora-verify:$1-$ARCH-$STAMP-$$" why
+  log "checking $(basename "$2")"
+  if why="$(bsl_fedora_size_check "$t")"; then
+    log "$why"
+  elif [ "${OVER_CACHE_LIMIT:-}" = keep ]; then
+    log "WARNING: $why (kept: OVER_CACHE_LIMIT=keep)"
+    OVER_LIMIT+=("$2")
+  else
+    reject "$t" "$why (OVER_CACHE_LIMIT=keep keeps it, for a local measurement only)"
+  fi
+  zstd -dc "$t" | tar tvf - > "$WORK/list" 2>/dev/null || reject "$t" "the image does not list"
+  why="$(bsl_fedora_listing_check "$WORK/list")" || reject "$t" "$(echo "$why" | paste -sd ';' - | sed 's/;/; /g')"
   rm -f "$WORK/list"
   IMAGES+=("$img")
   zstd -dc "$t" | docker import --platform "linux/$ARCH" - "$img" >/dev/null
@@ -304,9 +329,10 @@ verify_image() {  # $1 = base|desktop, $2 = tarball
   docker create --name "$v" --platform "linux/$ARCH" --network none "${MOUNT[@]}" \
     -v "$WORK/check.sh:/check.sh:ro" -v "$WORK/bsl-os.sh:/bsl-os.sh:ro" -e BSLOS=$([ "$1" = base ] && echo /bsl-os.sh || echo /usr/lib/breadstick/bsl-os.sh) \
     "$img" sh /check.sh "$1" "$RELEASE" "$STAGED" >/dev/null
-  docker start -a "$v" || { echo "ERROR: $(basename "$t") failed its checks" >&2; exit 1; }
+  docker start -a "$v" || reject "$t" "$(basename "$2") failed its checks"
   docker rm -f "$v" >/dev/null
   docker rmi -f "$img" >/dev/null
+  mv -f "$t" "$2"
 }
 write_manifest() {  # $1 = base|desktop, $2 = tarball
   [ -n "${MANIFEST_DIR:-}" ] || return 0
@@ -338,6 +364,11 @@ fi
 if [ "$WHAT" != desktop ]; then verify_image base "$BASE_T"; write_manifest base "$BASE_T"; fi
 if [ "$WHAT" != base ]; then verify_image desktop "$DESK_T"; write_manifest desktop "$DESK_T"; fi
 for t in "$BASE_T" "$DESK_T"; do
-  [ -f "$t" ] && log "Artifact: $t ($(du -h "$t" | cut -f1))"
+  [ -f "$t" ] || continue
+  over=""
+  for o in "${OVER_LIMIT[@]}"; do
+    if [ "$o" = "$t" ]; then over=", OVER Cloudflare's cache limit: never publish it as it is"; fi
+  done
+  log "Artifact: $t ($(stat -c %s "$t") bytes$over)"
 done
 log "Nothing was uploaded."
