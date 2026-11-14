@@ -53,6 +53,21 @@
 #    bytes is refused (Cloudflare's per-file cache limit, plan 5.4); OVER_CACHE_LIMIT=keep keeps it for a local
 #    measurement only, with a warning.
 #
+# DOCS_LANGS (round 8; the owner, 2026-11-13/14, the Fedora rule carried over): all, trimmed or auto (the default).
+# The base image always has documentation and every language. The desktop image: all ships both (554.7 MB on
+# 2026-11-14, over the cache limit); trimmed takes them out after the desktop step (its own trim step, in a container
+# from the finished desktop one); auto exports it with both first and trims it only when that image is at or over the
+# limit. Trimmed means: every file under /usr/share/doc, man, info and gtk-doc, and every language's folder under
+# /usr/share/locale and /usr/share/help but English (en, en_US; help's C) deleted, files and links only (never a
+# recursive delete); glibc's locale sources (/usr/share/i18n), X11's locale data and every program's own files stay,
+# and so does pacman.conf without NoExtract, so everything installed or updated later brings its documentation and
+# every language. pacman -Qk then lists those files as missing, which the checks allow under those paths only.
+# /etc/breadstick/image-trimmed says so. Nothing syncs by itself on Arch (decision 11), so the user's language comes
+# from what is in the image: the session makes its locale from glibc's sources (bsl_region_generate, locale-gen, no
+# pacman), and its translations come back at the user's Updates (PackageOps.Pacman.upgradeAll's bsl_pkg_langfill: the
+# packages missing them reinstalled at the versions just synced, never a partial upgrade) or with each package's next
+# update.
+#
 # PACMAN_STAGE: until pacman.breadstick.io serves packages, a local stage made by Apt's pacman/stage-pacman-repo.sh
 # (TEST=1 for [breadstick-test]) is the only repository there is. It is mounted read-only at /bsl-stage and used ONLY
 # by the bake's own pacman configuration (/tmp, removed after); the image's pacman.conf names pacman.breadstick.io
@@ -83,6 +98,8 @@ STAMP="${STAMP:-$(date -u +%Y%m%d%H%M)}"
 case "$STAMP" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "ERROR: STAMP must be YYYYMMDDHHMM" >&2; exit 1 ;; esac
 LEVEL="${BAKE_ZSTD_LEVEL:-19}"
 case "${OVER_CACHE_LIMIT:-}" in ''|keep) ;; *) echo "ERROR: OVER_CACHE_LIMIT is keep or unset" >&2; exit 1 ;; esac
+DOCS_LANGS="${DOCS_LANGS:-auto}"
+case "$DOCS_LANGS" in all|trimmed|auto) ;; *) echo "ERROR: DOCS_LANGS is all, trimmed or auto" >&2; exit 1 ;; esac
 PREFIX="${CONTAINER_PREFIX:-bsl-arch-bake}"
 case "$PREFIX" in bsl-[a-z0-9-]*) ;; *) echo "ERROR: CONTAINER_PREFIX must start with bsl-" >&2; exit 1 ;; esac
 # shellcheck source=arch-image-checks.sh
@@ -259,6 +276,36 @@ mkbake() {
     fi
 }
 P="pacman --config $BAKE --noconfirm"
+if [ "$STEP" = trim ]; then
+    # A trimmed desktop image (DOCS_LANGS above): documentation and every language but English taken out, files and
+    # links only, never through a link to a folder (find -delete removes the link itself). Folders stay.
+    say "10. trimmed: no documentation, English only (pacman.conf keeps no NoExtract: later installs bring both)"
+    before=$(du -sk /usr/share | cut -f1)
+    for d in /usr/share/doc /usr/share/man /usr/share/info /usr/share/gtk-doc; do
+        [ -d "$d" ] && [ ! -L "$d" ] || continue
+        find "$d" -mindepth 1 \( -type f -o -type l \) -delete
+    done
+    for d in /usr/share/locale /usr/share/help; do
+        [ -d "$d" ] && [ ! -L "$d" ] || continue
+        for l in "$d"/*/; do
+            l=${l%/}
+            [ -d "$l" ] && [ ! -L "$l" ] || continue
+            case "${l##*/}" in en|en_US|C) continue ;; esac
+            find "$l" -mindepth 1 \( -type f -o -type l \) -delete
+        done
+    done
+    [ -s /usr/share/i18n/SUPPORTED ] && [ -d /usr/share/i18n/locales ] || { echo "glibc's locale sources are gone" >&2; exit 1; }
+    ! pacman-conf NoExtract | grep -q . || { echo "pacman.conf has NoExtract" >&2; exit 1; }
+    mkdir -p /etc/breadstick
+    { echo "# Breadstick Linux: this image was baked without documentation and translations (only English), to fit"
+      echo "# Cloudflare's per-file cache limit. Nothing stops them now (no NoExtract): every later install and update"
+      echo "# brings both; the session makes the user's locale from glibc's sources, and Updates puts back the"
+      echo "# translations for the user's languages (bsl_pkg_langfill)."
+      echo "docs"
+      echo "languages en en_US"; } > /etc/breadstick/image-trimmed
+    say "trim done: /usr/share $before KiB -> $(du -sk /usr/share | cut -f1) KiB"
+    exit 0
+fi
 if [ "$STEP" = base ]; then
     [ "$(uname -m)" = x86_64 ] || { echo "not x86-64" >&2; exit 1; }
     grep -qx ID=arch /usr/lib/os-release || { echo "not Arch's os-release" >&2; exit 1; }
@@ -474,7 +521,7 @@ export_image() {  # $1 = container, $2 = tarball
 # imported into Docker and run with no network, never unpacked on this host.
 cat > "$WORK/check.sh" <<'BSL_ARCH_CHECK_9c2e'
 set -u
-FLAVOR=$1
+FLAVOR=$1 TRIMMED=${2:-}
 FPR=EABBC4B5F0BD78B405AF005FF02A2D085AC691BC
 fails=0
 ok() { echo "ok   $*"; }
@@ -498,6 +545,19 @@ BACKUP_OK='/etc/(pacman\.conf|pacman\.d/mirrorlist|passwd|group|shadow|gshadow|s
 pacman -Qkk > /tmp/qkk 2>/tmp/qkk.err; qrc=$?
 cat /tmp/qkk /tmp/qkk.err | grep -E '^backup file: |\((UID|GID|Permissions) mismatch\)$' | sed 's/^/     /'
 : > /tmp/qkk.rest
+# A trimmed image: the files the trim step took out (documentation, and every language but English), which pacman
+# still lists, taken out of the stream first in one pass (tens of thousands of lines: a loop of greps per line takes
+# most of an hour under qemu). Nothing else may be missing; an English one is never allowed.
+if [ -n "$TRIMMED" ]; then
+    cat /tmp/qkk /tmp/qkk.err > /tmp/qkk.all
+    grep -E '^warning: [^:]+: /usr/share/(locale|help)/(en|en_US|C)/' /tmp/qkk.all > /tmp/qkk.en || true
+    grep -Ev -e '^[^ :]+: [0-9]+ total files, [0-9]+ missing files?$' \
+        -e '^warning: [^:]+: /usr/share/(doc|man|info|gtk-doc)/[^ ]+ \(No such file or directory\)$' \
+        -e '^warning: [^:]+: /usr/share/(locale|help)/[^/ ]+/[^ ]+ \(No such file or directory\)$' /tmp/qkk.all > /tmp/qkk.kept || true
+    echo "     trimmed: $(($(wc -l < /tmp/qkk.all) - $(wc -l < /tmp/qkk.kept))) lines of pacman -Qkk are the files the trim step took out"
+    cat /tmp/qkk.en /tmp/qkk.kept > /tmp/qkk
+    : > /tmp/qkk.err
+fi
 cat /tmp/qkk /tmp/qkk.err | while IFS= read -r l; do
     case "$l" in
         "warning: database file for '"*"' does not exist (use '-Sy' to download)") continue ;;
@@ -505,6 +565,7 @@ cat /tmp/qkk /tmp/qkk.err | while IFS= read -r l; do
         "warning: filesystem: /etc/mtab (Symlink path mismatch)"|"warning: filesystem: /etc/mtab (Modification time mismatch)") continue ;;
     esac
     printf '%s\n' "$l" | grep -Eq '^[^ :]+: [0-9]+ total files, [0-9]+ altered files?$' && continue
+
     printf '%s\n' "$l" | grep -Eq "^backup file: [^:]+: $BACKUP_OK \\([A-Za-z0-9 ]+ mismatch\\)\$" && continue
     f=$(printf '%s\n' "$l" | sed -n 's/^warning: [^:]*: \(\/[^ ]*\) (\(UID\|GID\|Permissions\) mismatch)$/\1/p')
     if [ -n "$f" ] && grep -hEq "^[zZdDvqQ][[:space:]]+$f[[:space:]]" /usr/lib/tmpfiles.d/*.conf 2>/dev/null; then continue; fi
@@ -593,8 +654,18 @@ check "the known gap is still the gap: $BSL_LOC_GAPS fall back to C.UTF-8 in the
 sed 's/^/     no longer a gap (update BSL_LOC_GAPS and the plan): /' /tmp/gapgone
 echo "     known gap, the session falls back to C.UTF-8: $(for g in $BSL_LOC_GAPS; do printf '%s ' "$g"; done)(glibc: $(grep -E '^(bn|fa|hi|ur|vi)_[A-Z][A-Z] UTF-8$' /usr/share/i18n/SUPPORTED | cut -d' ' -f1 | paste -sd, -))"
 check "a locale builds from its source (localedef de_DE.UTF-8)" sh -c 'mkdir -p /tmp/loc && localedef --no-archive -i de_DE -f UTF-8 /tmp/loc/de_DE.UTF-8 && test -s /tmp/loc/de_DE.UTF-8/LC_CTYPE'
-check "translations and manuals on disk (coreutils' German .mo, bash's man page)" sh -c \
-    'test -s /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test -s /usr/share/man/man1/bash.1.gz'
+if [ -n "$TRIMMED" ]; then
+    check "trimmed: /etc/breadstick/image-trimmed says so (docs, languages en en_US)" sh -c \
+        'grep -qx docs /etc/breadstick/image-trimmed && grep -qx "languages en en_US" /etc/breadstick/image-trimmed'
+    check "trimmed: coreutils' German and bash's man page are out, pacman still lists them, English is in" sh -c \
+        'test ! -e /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test ! -e /usr/share/man/man1/bash.1.gz && pacman -Qlq coreutils | grep -qx /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test -x /usr/bin/bash'
+    check "trimmed: glibc's locale sources and X11's locale data stay (the session makes the user's locale offline)" sh -c \
+        'test -s /usr/share/i18n/SUPPORTED && test -f /usr/share/i18n/locales/de_DE && test -d /usr/share/X11/locale/en_US.UTF-8'
+else
+    check "translations and manuals on disk (coreutils' German .mo, bash's man page)" sh -c \
+        'test -s /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test -s /usr/share/man/man1/bash.1.gz'
+    check "not marked trimmed" test ! -e /etc/breadstick/image-trimmed
+fi
 check "the bake's own files are gone (/bake.sh, /bsl-stage, /bsl-key, *.bsl-orig)" sh -c \
     'test ! -e /bake.sh && test ! -e /etc/hosts.bsl-orig && test ! -e /etc/resolv.conf.bsl-orig && test ! -e /etc/pacman.conf.bsl-new'
 if [ "$FLAVOR" = desktop ]; then
@@ -666,7 +737,7 @@ reject() {  # $1 = the image as written (<name>.unchecked), $2 = why: it becomes
   exit 1
 }
 OVER_LIMIT=()
-verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes)
+verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes), $3 = 1: trimmed
   local t="$2.unchecked" v="$PREFIX-verify-$1-$STAMP-$$" img="$PREFIX-verify:$1-$STAMP-$$" why
   log "checking $(basename "$2")"
   if why="$(bsl_arch_size_check "$t")"; then
@@ -678,7 +749,7 @@ verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, re
     reject "$t" "$why (OVER_CACHE_LIMIT=keep keeps it, for a local measurement only)"
   fi
   zstd -dc "$t" | tar tvf - > "$WORK/list" 2>/dev/null || reject "$t" "the image does not list"
-  why="$(bsl_arch_listing_check "$WORK/list")" || reject "$t" "$(echo "$why" | paste -sd ';' - | sed 's/;/; /g')"
+  why="$(bsl_arch_listing_check "$WORK/list" "${3:+trimmed}")" || reject "$t" "$(echo "$why" | paste -sd ';' - | sed 's/;/; /g')"
   log "listing: $(grep -c . "$WORK/list") entries, $(grep -c '^h' "$WORK/list") hard links"
   rm -f "$WORK/list"
   zstd -dc "$t" | tar xOf - ./etc/pacman.conf > "$WORK/pacman.conf" || reject "$t" "no /etc/pacman.conf in the image"
@@ -695,7 +766,7 @@ verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, re
   CONTAINERS+=("$v")
   docker create --name "$v" --platform "linux/$ARCH" --network none \
     -v "$WORK/check.sh:/check.sh:ro" -v "$WORK/bsl-os.sh:/bsl-os.sh:ro" -e BSLOS=$([ "$1" = base ] && echo /bsl-os.sh || echo /usr/lib/breadstick/bsl-os.sh) \
-    "$img" sh /check.sh "$1" >/dev/null
+    "$img" sh /check.sh "$1" "${3:-}" >/dev/null
   docker start -a "$v" || reject "$t" "$(basename "$2") failed its checks"
   docker rm -f "$v" >/dev/null
   docker rmi -f "$img" >/dev/null
@@ -714,6 +785,7 @@ write_manifest() {  # $1 = base|desktop, $2 = tarball
 
 BASE_T="$(name_of base)"
 DESK_T="$(name_of desktop)"
+DESK_TRIMMED=""
 run_step base "$BOOT_IMG"
 BASE_C="$C"
 if [ "$WHAT" != desktop ]; then
@@ -724,16 +796,32 @@ if [ "$WHAT" != base ]; then
   IMAGES+=("$STEP_IMG")
   docker commit "$BASE_C" "$STEP_IMG" >/dev/null
   run_step desktop "$STEP_IMG"
-  export_image "$C" "$DESK_T"
+  DESK_C="$C"
+  [ "$DOCS_LANGS" = trimmed ] || export_image "$DESK_C" "$DESK_T"
+  if [ "$DOCS_LANGS" = trimmed ] || { [ "$DOCS_LANGS" = auto ] && ! why="$(bsl_arch_size_check "$DESK_T.unchecked")"; }; then
+    if [ "$DOCS_LANGS" = auto ]; then
+      log "$why"
+      log "DOCS_LANGS=auto: the desktop image again, without documentation and languages (plan 5.4); the one with them is dropped"
+      rm -f "$DESK_T.unchecked"
+    fi
+    TRIM_IMG="$PREFIX:desktop-$STAMP-$$"
+    IMAGES+=("$TRIM_IMG")
+    docker commit "$DESK_C" "$TRIM_IMG" >/dev/null
+    run_step trim "$TRIM_IMG"
+    export_image "$C" "$DESK_T"
+    DESK_TRIMMED=1
+  fi
 fi
 if [ "$WHAT" != desktop ]; then verify_image base "$BASE_T"; write_manifest base "$BASE_T"; fi
-if [ "$WHAT" != base ]; then verify_image desktop "$DESK_T"; write_manifest desktop "$DESK_T"; fi
+if [ "$WHAT" != base ]; then verify_image desktop "$DESK_T" "$DESK_TRIMMED"; write_manifest desktop "$DESK_T"; fi
 for t in "$BASE_T" "$DESK_T"; do
   [ -f "$t" ] || continue
   over=""
   for o in "${OVER_LIMIT[@]}"; do
     if [ "$o" = "$t" ]; then over=", OVER Cloudflare's cache limit: never publish it as it is"; fi
   done
-  log "Artifact: $t ($(stat -c %s "$t") bytes$over)"
+  trimmed=""
+  [ "$t" != "$DESK_T" ] || [ -z "$DESK_TRIMMED" ] || trimmed=", trimmed: no documentation, English only, both come back with later installs"
+  log "Artifact: $t ($(stat -c %s "$t") bytes$over$trimmed)"
 done
 log "Done in $(took). Nothing was uploaded."

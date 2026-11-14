@@ -23,7 +23,8 @@ bsl_arch_size_check() {
   echo "$_b is $_s bytes, $((BSL_CACHE_LIMIT - _s)) under Cloudflare's per-file cache limit ($BSL_CACHE_LIMIT bytes)"
 }
 
-# $1 = the image's listing (GNU tar tvf). Every refusal is printed; returns the number of them (0 = the listing is right).
+# $1 = the image's listing (GNU tar tvf), $2 = trimmed for a trimmed desktop image. Every refusal is printed; returns the
+# number of them (0 = the listing is right).
 bsl_arch_listing_check() {
   _n=0
   _bad() { echo "$1"; _n=$((_n + 1)); }
@@ -66,7 +67,16 @@ bsl_arch_listing_check() {
   # Hard links kept as hard links, as in the Debian images (the app makes them again when it unpacks).
   grep -Eq '^h.* \./[^ ]+ link to \./' "$1" || _bad "the image has no hard links (they were not kept)"
   grep -Eq ' \./usr/share/i18n/SUPPORTED$' "$1" || _bad "the locale list (/usr/share/i18n/SUPPORTED) is not in the image"
-  grep -Eq ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" || _bad "translations under /usr/share/locale are not in the image"
+  # A trimmed desktop image ($2 = trimmed, bootstrap-arch.sh's DOCS_LANGS): no translation but English, and it says so;
+  # every other image has every language and no such marker.
+  if [ "${2:-}" = trimmed ]; then
+    grep -Eq ' \./etc/breadstick/image-trimmed$' "$1" || _bad "a trimmed image without /etc/breadstick/image-trimmed"
+    ! grep -Eq ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" || _bad "a trimmed image still has German translations"
+    ! grep -Eq ' \./usr/share/man/man1/[^ ]+$' "$1" || _bad "a trimmed image still has manual pages"
+  else
+    grep -Eq ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" || _bad "translations under /usr/share/locale are not in the image"
+    ! grep -Eq ' \./etc/breadstick/image-trimmed$' "$1" || _bad "the image is marked trimmed (/etc/breadstick/image-trimmed)"
+  fi
   return "$_n"
 }
 

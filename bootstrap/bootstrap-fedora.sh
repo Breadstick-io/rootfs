@@ -13,11 +13,16 @@
 #      (tsflags=nodocs in /etc/dnf/dnf.conf, %_install_langs en_US in /etc/rpm/macros.image-language-conf), and a
 #      system made from it would never install them for anything added later. Both settings go (dnf.conf is then
 #      libdnf5's own file again), then dnf upgrade --refresh: the release's updates repository, security fixes
-#      included.
+#      included. A TRIMMED image (DOCS_LANGS, below) keeps the settings gone too, but its own transactions install
+#      neither (a drop-in tsflags=nodocs for dnf and %_install_langs en_US:en for rpm, both the bake's only and
+#      removed before the image is written), and it carries /etc/breadstick/image-trimmed: the session fills the
+#      user's language in at the first start (breadstick-session's bsl_region_fill, plan 5.4).
 #   3. The base set (what bootstrap-debian.sh's INCLUDE gives Debian): sudo, passwd, ncurses-term, nano, less,
 #      procps-ng, openssh-clients, tmux, curl, gnupg2, ca-certificates, glibc-langpack-en. No weak dependencies, as
 #      the app installs. Then every package the container image installed without some of its files (rpm's file
-#      state "not installed": its documentation and translations) is reinstalled, and none may be left.
+#      state "not installed": its documentation and translations, and some of dnf5's own folders) is reinstalled, and
+#      none may be left (a trimmed image: reinstalled under its trim settings, so only documentation and translations
+#      may be left out, nothing else).
 #   4. desktop: breadstick-desktop, then a browser through Breadstick's own install-browser.sh with no choice (its
 #      default, Chromium; the owner: the image ships a browser), and the desktop-ok marker the app looks for.
 #   5. sudo 4755 (Fedora ships 4111, which proot's fake root cannot read to run: plan section 11) and /root 0700
@@ -39,6 +44,13 @@
 # be served uncached: for local measurement only, the owner's call before anything like it is published.
 # An image is written as <name>.unchecked and gets its name only when every check has passed; one that fails a check
 # is renamed <name>.rejected. dist/ never holds an unchecked or failed image under a good name.
+#
+# DOCS_LANGS (round 8; the owner, 2026-11-13/14): all, trimmed or auto (the default). The base image always has
+# documentation and every language (58-61 MB). The desktop image: all bakes it with both; trimmed without them (the
+# base step is run again for it, trimmed); auto bakes it with both first and, when that image is at or over the cache
+# limit, bakes it again trimmed and keeps only the trimmed one (the 4.0 amd64 desktop image: 546,725,114 bytes with
+# both, plan 5.4; arm64 fits, 1.76 MB under, and falls back the same way the day it does not). The same rule as the Arch
+# desktop image's (bootstrap-arch.sh).
 #
 # RPM_STAGE: until rpm.breadstick.io serves packages, a local stage made by Apt/rpm/stage-rpm-repo.sh is the only
 # repository there is. It is mounted read-only at /bsl-stage and the image's breadstick.repo points at
@@ -65,6 +77,8 @@ STAMP="${STAMP:-$(date -u +%Y%m%d%H%M)}"
 case "$STAMP" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "ERROR: STAMP must be YYYYMMDDHHMM" >&2; exit 1 ;; esac
 LEVEL="${BAKE_ZSTD_LEVEL:-19}"
 case "${OVER_CACHE_LIMIT:-}" in ''|keep) ;; *) echo "ERROR: OVER_CACHE_LIMIT is keep or unset" >&2; exit 1 ;; esac
+DOCS_LANGS="${DOCS_LANGS:-auto}"
+case "$DOCS_LANGS" in all|trimmed|auto) ;; *) echo "ERROR: DOCS_LANGS is all, trimmed or auto" >&2; exit 1 ;; esac
 # shellcheck source=fedora-image-checks.sh
 . "$HERE/fedora-image-checks.sh"
 [ "$BSL_CACHE_LIMIT" -le 512000000 ] 2>/dev/null || { echo "ERROR: BSL_CACHE_LIMIT may only lower the 512,000,000-byte limit" >&2; exit 1; }
@@ -118,9 +132,21 @@ BASE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
 # The bake itself, run as root in the container. Its own file (no heredoc that its content could end early).
 cat > "$WORK/bake.sh" <<'BSL_FEDORA_BAKE_7d41'
 set -eu
-STEP=$1 REL=$2 STAGED=$3
+STEP=$1 REL=$2 STAGED=$3 TRIMMED=${4:-}
 A=$(uname -m)
 D="dnf -y --setopt=install_weak_deps=False"
+# A trimmed image: the bake's own transactions install no documentation and English only (the settings below, in
+# files of the bake's own that step 5 removes). The image's own settings are gone either way (step 2).
+TRIM_DNF=/etc/dnf/libdnf5.conf.d/99-breadstick-bake-trim.conf
+TRIM_RPM=/etc/rpm/macros.breadstick-bake-trim
+trim_on() {  # at the start of each step of a trimmed bake (step 5 of the base step takes them out again)
+    echo "[bake] trimmed: this step's transactions install no documentation and English only"
+    mkdir -p "${TRIM_DNF%/*}"
+    printf '# Breadstick image bake only (removed before the image is written).\n[main]\ntsflags=nodocs\n' > "$TRIM_DNF"
+    printf '# Breadstick image bake only (removed before the image is written).\n%%_install_langs en_US:en\n' > "$TRIM_RPM"
+    dnf5 --dump-main-config 2>/dev/null | grep -Eq '^tsflags *= *nodocs' || { echo "dnf did not take the bake's tsflags" >&2; exit 1; }
+    [ "$(rpm -E %_install_langs)" = en_US:en ] || { echo "rpm did not take the bake's languages" >&2; exit 1; }
+}
 if [ -n "$STAGED" ]; then BSL="file:///bsl-stage"; else BSL="https://rpm.breadstick.io"; fi
 if [ "$STEP" = base ]; then
     [ "$(rpm -E %fedora)" = "$REL" ] || { echo "this image is not Fedora $REL" >&2; exit 1; }
@@ -138,11 +164,15 @@ if [ "$STEP" = base ]; then
     rm -f /etc/rpm/macros.image-language-conf
     ! grep -q '^tsflags' /etc/dnf/dnf.conf || { echo "dnf.conf still has tsflags: $(grep '^tsflags' /etc/dnf/dnf.conf)" >&2; exit 1; }
     [ "$(rpm -E %_install_langs)" = all ] || { echo "rpm installs only these languages: $(rpm -E %_install_langs)" >&2; exit 1; }
+    [ -z "$TRIMMED" ] || trim_on
     $D upgrade --refresh
     echo "[bake] 3. the base set"
     $D install sudo passwd shadow-utils ncurses-term nano less procps-ng openssh-clients tmux curl gnupg2 \
         ca-certificates glibc-langpack-en
     left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\n]' | sed -n 's/^not installed\t//p' | sort -u)
+    # Trimmed too: the container image left out more than documentation and translations (dnf5's own folders,
+    # /etc/dnf/dnf5-aliases.d and /usr/lib64/dnf5/plugins, seen 2026-11-14), and a reinstall under the bake's trim
+    # settings puts back everything but those two.
     if [ -n "$left" ]; then
         echo "[bake] 3. reinstalling $(echo "$left" | wc -l) packages the container image installed without their documentation or translations"
         # shellcheck disable=SC2086
@@ -150,6 +180,7 @@ if [ "$STEP" = base ]; then
     fi
 else
     echo "[bake] 4. breadstick-desktop and a browser"
+    [ -z "$TRIMMED" ] || trim_on
     $D upgrade --refresh
     $D install breadstick-desktop
     sh /usr/lib/breadstick/install-browser.sh
@@ -170,8 +201,29 @@ chmod 4755 /usr/bin/sudo
 chmod 0700 /root
 left=$(rpm -qa 'fedora-release*' 'fedora-logos*' 'fedora-release-notes*')
 [ -z "$left" ] || { echo "Fedora's branding came back: $left" >&2; exit 1; }
-left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\t%{FILENAMES}\n]' | grep '^not installed' || true)
-[ -z "$left" ] || { echo "files rpm left out (documentation or translations): $(echo "$left" | head -n 5)" >&2; exit 1; }
+if [ -n "$TRIMMED" ]; then
+    rm -f "$TRIM_DNF" "$TRIM_RPM"
+    rmdir "${TRIM_DNF%/*}" 2>/dev/null || true
+    ! dnf5 --dump-main-config 2>/dev/null | grep -Eq '^tsflags *= *.*nodocs' || { echo "dnf still installs no documentation" >&2; exit 1; }
+    [ "$(rpm -E %_install_langs)" = all ] || { echo "rpm still installs only: $(rpm -E %_install_langs)" >&2; exit 1; }
+    # Only documentation (rpm's doc flag, and the folders under /usr/share/doc, man and info that hold it),
+    # translations (a %lang) and empty folders may be left out of a trimmed image: with those settings rpm also leaves
+    # out a few packaged folders (dnf5's /etc/dnf/dnf5-aliases.d and /usr/lib64/dnf5/plugins, as Fedora's own
+    # container image does), which whatever installs into them later makes.
+    left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{FILEFLAGS:fflags}\t%{FILELANGS}\t%{FILEMODES:perms}\t%{=NAME}\t%{FILENAMES}\n]' \
+        | awk -F '\t' '$1 == "not installed" && $2 !~ /d/ && $3 == "" && $4 !~ /^d/ && $6 !~ /^\/usr\/share\/(doc|man|info)\//' || true)
+    [ -z "$left" ] || { echo "files rpm left out that are neither documentation nor a translation: $(echo "$left" | head -n 5)" >&2; exit 1; }
+    mkdir -p /etc/breadstick
+    { echo "# Breadstick Linux: this image was baked without documentation and translations (only English), to fit"
+      echo "# Cloudflare's per-file cache limit. Nothing stops them now: every later install and update brings both, and"
+      echo "# the session fills in the user's language at the first start (bsl_region_fill)."
+      echo "docs"
+      echo "languages en_US:en"; } > /etc/breadstick/image-trimmed
+    echo "[bake] 5. trimmed: $(rpm -qa --qf '[%{FILESTATES:fstate}\n]' | grep -c '^not installed') files left out, documentation and translations only"
+else
+    left=$(rpm -qa --qf '[%{FILESTATES:fstate}\t%{=NAME}\t%{FILENAMES}\n]' | grep '^not installed' || true)
+    [ -z "$left" ] || { echo "files rpm left out (documentation or translations): $(echo "$left" | head -n 5)" >&2; exit 1; }
+fi
 # No machine-id or random seed of the bake's own: each device makes its own (the session, when the file is empty).
 : > /etc/machine-id
 rm -f /var/lib/systemd/random-seed
@@ -217,12 +269,12 @@ if not seen_hosts:
     sys.exit("etc/hosts was not in the export")
 BSL_FEDORA_FILTER_7d41
 
-run_step() {  # $1 = base|desktop, $2 = image to start from; leaves the container's name in $C
-  C="bsl-fedora-bake-$1-$ARCH-$$"
+run_step() {  # $1 = base|desktop, $2 = image to start from, $3 = 1 for a trimmed one; leaves the container's name in $C
+  C="bsl-fedora-bake-$1-$ARCH-$$${3:+-trimmed}"
   CONTAINERS+=("$C")
-  log "Fedora $RELEASE $ARCH: $1 step in $C"
+  log "Fedora $RELEASE $ARCH: $1 step in $C${3:+ (trimmed: no documentation, English only)}"
   docker create --name "$C" --platform "linux/$ARCH" "${MOUNT[@]}" -v "$HERE:/bsl-key:ro" -v "$WORK/bake.sh:/bake.sh:ro" \
-    "$2" sh /bake.sh "$1" "$RELEASE" "$STAGED" >/dev/null
+    "$2" sh /bake.sh "$1" "$RELEASE" "$STAGED" "${3:-}" >/dev/null
   docker start -a "$C"
   [ "$(docker inspect -f '{{.State.ExitCode}}' "$C")" = 0 ] || { echo "ERROR: the $1 step failed" >&2; exit 1; }
 }
@@ -248,7 +300,7 @@ cp "$BSLOS_TREE/breadstick-session/src/lib/bsl-os.sh" "$WORK/bsl-os.sh"
 log "the base image's bsl-os.sh: $BSLOS_TREE ($(git -C "$BSLOS_TREE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?') $(git -C "$BSLOS_TREE" rev-parse --short HEAD 2>/dev/null || echo '?'))"
 cat > "$WORK/check.sh" <<'BSL_FEDORA_CHECK_7d41'
 set -u
-FLAVOR=$1 REL=$2 STAGED=$3
+FLAVOR=$1 REL=$2 STAGED=$3 TRIMMED=${4:-}
 fails=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; fails=$((fails + 1)); }
@@ -279,10 +331,25 @@ check "/etc/machine-id is empty and there is no random seed (each device makes i
     'test -f /etc/machine-id && test ! -s /etc/machine-id && test ! -e /var/lib/systemd/random-seed'
 check "documentation and every language: no tsflags in dnf.conf, %_install_langs all" sh -c \
     '! grep -q "^tsflags" /etc/dnf/dnf.conf && test ! -e /etc/rpm/macros.image-language-conf && test "$(rpm -E %_install_langs)" = all'
-check "no file rpm left out (file state 'not installed'): documentation and translations are on disk" sh -c \
-    '! rpm -qa --qf "[%{FILESTATES:fstate} %{=NAME} %{FILENAMES}\n]" | grep "^not installed"'
-check "bash's man page and a translation are installed" sh -c \
-    'rpm -qd bash | grep -q "/man1/bash\.1" && test -e "$(rpm -qd bash | grep "/man1/bash\.1" | head -n 1)" && rpm -ql bash | grep -q "^/usr/share/locale/de/LC_MESSAGES/bash\.mo$" && test -e /usr/share/locale/de/LC_MESSAGES/bash.mo'
+check "rpm leaves /dev, /sys and /proc alone (%_netsharedpath, breadstick-release: Android refuses rpm an open of /dev)" \
+    test "$(rpm -E %_netsharedpath)" = /dev:/sys:/proc
+if [ -n "$TRIMMED" ]; then
+    check "trimmed: /etc/breadstick/image-trimmed says so (docs, languages en_US:en)" sh -c \
+        'grep -qx docs /etc/breadstick/image-trimmed && grep -qx "languages en_US:en" /etc/breadstick/image-trimmed'
+    check "trimmed: no bake setting left (no tsflags drop-in, no language macro of the bake's)" sh -c \
+        'test ! -e /etc/dnf/libdnf5.conf.d/99-breadstick-bake-trim.conf && test ! -e /etc/rpm/macros.breadstick-bake-trim && ! dnf5 --dump-main-config 2>/dev/null | grep -Eq "^tsflags *= *.*nodocs"'
+    check "trimmed: only documentation, translations and empty folders are left out (rpm's doc flag, a %lang, a folder)" sh -c \
+        '! rpm -qa --qf "[%{FILESTATES:fstate}\t%{FILEFLAGS:fflags}\t%{FILELANGS}\t%{FILEMODES:perms}\t%{FILENAMES}\n]" | awk -F "\t" "\$1 == \"not installed\" && \$2 !~ /d/ && \$3 == \"\" && \$4 !~ /^d/ && \$5 !~ /^\/usr\/share\/(doc|man|info)\//" | grep .'
+    check "trimmed: bash's man page and German are left out, its English is there" sh -c \
+        'test ! -e /usr/share/man/man1/bash.1.gz && test ! -e /usr/share/locale/de/LC_MESSAGES/bash.mo && rpm -q --qf "[%{FILESTATES:fstate} %{FILENAMES}\n]" bash | grep -q "^not installed /usr/share/locale/de/LC_MESSAGES/bash.mo$" && test -x /usr/bin/bash'
+    check "trimmed: glibc's English locale is there (glibc-langpack-en, C.UTF-8)" sh -c 'locale -a | grep -qix en_US.utf8 && locale -a | grep -qix c.utf8'
+else
+    check "no file rpm left out (file state 'not installed'): documentation and translations are on disk" sh -c \
+        '! rpm -qa --qf "[%{FILESTATES:fstate} %{=NAME} %{FILENAMES}\n]" | grep "^not installed"'
+    check "bash's man page and a translation are installed" sh -c \
+        'rpm -qd bash | grep -q "/man1/bash\.1" && test -e "$(rpm -qd bash | grep "/man1/bash\.1" | head -n 1)" && rpm -ql bash | grep -q "^/usr/share/locale/de/LC_MESSAGES/bash\.mo$" && test -e /usr/share/locale/de/LC_MESSAGES/bash.mo'
+    check "not marked trimmed" test ! -e /etc/breadstick/image-trimmed
+fi
 if [ "$FLAVOR" = desktop ]; then
     check "breadstick-desktop installed, from the Breadstick repository" sh -c \
         'test "$(dnf -q repoquery --installed --qf "%{from_repo}" breadstick-desktop)" = breadstick'
@@ -309,7 +376,7 @@ reject() {  # $1 = the image as written (<name>.unchecked), $2 = why: it becomes
   exit 1
 }
 OVER_LIMIT=()
-verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes)
+verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes), $3 = 1: trimmed
   local t="$2.unchecked" v="bsl-fedora-verify-$1-$ARCH-$$" img="bsl-fedora-verify:$1-$ARCH-$STAMP-$$" why
   log "checking $(basename "$2")"
   if why="$(bsl_fedora_size_check "$t")"; then
@@ -328,7 +395,7 @@ verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, re
   CONTAINERS+=("$v")
   docker create --name "$v" --platform "linux/$ARCH" --network none "${MOUNT[@]}" \
     -v "$WORK/check.sh:/check.sh:ro" -v "$WORK/bsl-os.sh:/bsl-os.sh:ro" -e BSLOS=$([ "$1" = base ] && echo /bsl-os.sh || echo /usr/lib/breadstick/bsl-os.sh) \
-    "$img" sh /check.sh "$1" "$RELEASE" "$STAGED" >/dev/null
+    "$img" sh /check.sh "$1" "$RELEASE" "$STAGED" "${3:-}" >/dev/null
   docker start -a "$v" || reject "$t" "$(basename "$2") failed its checks"
   docker rm -f "$v" >/dev/null
   docker rmi -f "$img" >/dev/null
@@ -351,24 +418,44 @@ BASE_C="$C"
 if [ "$WHAT" != desktop ]; then
   export_image "$BASE_C" "$BASE_T"
 fi
-if [ "$WHAT" != base ]; then
-  STEP_IMG="bsl-fedora-bake:base-$ARCH-$STAMP-$$"
-  IMAGES+=("$STEP_IMG")
-  docker commit "$BASE_C" "$STEP_IMG" >/dev/null
-  run_step desktop "$STEP_IMG"
+desktop_from() {  # $1 = the base step's container, $2 = 1 for a trimmed image: the desktop step on it, exported
+  local step_img="bsl-fedora-bake:base-$ARCH-$STAMP-$$${2:+-trimmed}"
+  IMAGES+=("$step_img")
+  docker commit "$1" "$step_img" >/dev/null
+  run_step desktop "$step_img" "${2:-}"
   export_image "$C" "$DESK_T"
+}
+DESK_TRIMMED=""
+if [ "$WHAT" != base ]; then
+  if [ "$DOCS_LANGS" = trimmed ]; then
+    run_step base "$BASE_ID" 1
+    desktop_from "$C" 1
+    DESK_TRIMMED=1
+  else
+    desktop_from "$BASE_C"
+    if [ "$DOCS_LANGS" = auto ] && ! why="$(bsl_fedora_size_check "$DESK_T.unchecked")"; then
+      log "$why"
+      log "DOCS_LANGS=auto: the desktop image again, without documentation and languages (plan 5.4); the one with them is dropped"
+      rm -f "$DESK_T.unchecked"
+      run_step base "$BASE_ID" 1
+      desktop_from "$C" 1
+      DESK_TRIMMED=1
+    fi
+  fi
 fi
 # docker run --platform of another architecture re-points the tag at it (the classic image store keeps one per tag):
 # point it back at this host's, as Apt/rpm/build-rpms.py does.
 [ "$ARCH" = "$HOST" ] || docker pull -q --platform "linux/$HOST" "$IMAGE" >/dev/null
 if [ "$WHAT" != desktop ]; then verify_image base "$BASE_T"; write_manifest base "$BASE_T"; fi
-if [ "$WHAT" != base ]; then verify_image desktop "$DESK_T"; write_manifest desktop "$DESK_T"; fi
+if [ "$WHAT" != base ]; then verify_image desktop "$DESK_T" "$DESK_TRIMMED"; write_manifest desktop "$DESK_T"; fi
 for t in "$BASE_T" "$DESK_T"; do
   [ -f "$t" ] || continue
   over=""
   for o in "${OVER_LIMIT[@]}"; do
     if [ "$o" = "$t" ]; then over=", OVER Cloudflare's cache limit: never publish it as it is"; fi
   done
-  log "Artifact: $t ($(stat -c %s "$t") bytes$over)"
+  trimmed=""
+  [ "$t" != "$DESK_T" ] || [ -z "$DESK_TRIMMED" ] || trimmed=", trimmed: no documentation, English only, both come back with later installs"
+  log "Artifact: $t ($(stat -c %s "$t") bytes$over$trimmed)"
 done
 log "Nothing was uploaded."
