@@ -37,7 +37,6 @@ drwxr-xr-x 0/0               0 2026-11-14 03:10 ./dev/
 drwxr-xr-x 0/0               0 2026-11-14 03:10 ./etc/
 -rw-r--r-- 0/0             119 2025-10-12 12:21 ./etc/hosts
 -rw-r--r-- 0/0              65 2025-10-12 12:21 ./etc/resolv.conf
--r--r--r-- 0/0               0 2026-11-14 03:10 ./etc/machine-id
 lrwxrwxrwx 0/0               0 2025-10-12 12:21 ./etc/mtab -> ../proc/self/mounts
 lrwxrwxrwx 0/0               0 2026-11-01 03:45 ./etc/os-release -> ../usr/lib/os-release
 -rw-r--r-- 0/0            3100 2026-11-14 03:10 ./etc/pacman.conf
@@ -76,7 +75,14 @@ listing_case "the bake's /etc/hosts.bsl-orig" '/etc\/hosts$/a -rw-r--r-- 0/0    
 listing_case "the stage's mount point" '1a drwxr-xr-x 0/0               0 2026-11-14 03:10 ./bsl-stage/' "Docker's or the bake's own files"
 listing_case "an empty /etc/hosts (docker export's)" 's/^\(-rw-r--r-- 0\/0  *\)119\( .*etc\/hosts\)$/\10\2/' "/etc/hosts is not"
 listing_case "an empty /etc/resolv.conf" 's/^\(-rw-r--r-- 0\/0  *\)65\( .*etc\/resolv\.conf\)$/\10\2/' "/etc/resolv.conf is not"
-listing_case "a machine-id" 's/^\(-r--r--r-- 0\/0  *\)0\( .*etc\/machine-id\)$/\114\2/' "machine-id is not empty"
+listing_case "systemd's empty 0444 machine-id (the Linux user cannot write it)" '/etc\/hosts$/a -r--r--r-- 0/0               0 2026-11-14 03:10 ./etc/machine-id' "has an /etc/machine-id"
+listing_case "an empty 0644 machine-id" '/etc\/hosts$/a -rw-r--r-- 0/0               0 2026-11-14 03:10 ./etc/machine-id' "has an /etc/machine-id"
+listing_case "a machine-id of the bake's own" '/etc\/hosts$/a -r--r--r-- 0/0              33 2026-11-14 03:10 ./etc/machine-id' "has an /etc/machine-id"
+listing_case "a machine-id link" '/etc\/hosts$/a lrwxrwxrwx 0/0               0 2026-11-14 03:10 ./etc/machine-id -> /run/machine-id' "has an /etc/machine-id"
+listing_case "/etc 0555 (its owner cannot make the machine-id)" 's/^drwxr-xr-x \(.* \.\/etc\/\)$/dr-xr-xr-x \1/' "/etc is not 0755"
+sed '$a lrwxrwxrwx 0/0               0 2026-11-01 03:45 ./var/lib/dbus/machine-id -> /etc/machine-id' "$T/good" > "$T/list"
+if out="$(bsl_arch_listing_check "$T/list")"; then ok "dbus's /var/lib/dbus/machine-id link (to the file the session makes) passes"
+else bad "dbus's /var/lib/dbus/machine-id link is refused: $out"; fi
 listing_case "Docker's /etc/mtab (-> /proc/mounts)" 's| \./etc/mtab -> \.\./proc/self/mounts$| ./etc/mtab -> /proc/mounts|' "/etc/mtab is not"
 listing_case "the bake's /etc/mtab.bsl-orig" '/etc\/hosts$/a -rw-r--r-- 0/0              30 2026-11-14 03:10 ./etc/mtab.bsl-orig' "Docker's or the bake's own files"
 listing_case "a random seed" '$a -rw------- 0/0             512 2026-11-14 03:10 ./var/lib/systemd/random-seed' "random seed"

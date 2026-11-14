@@ -41,7 +41,10 @@ bsl_arch_listing_check() {
     || _bad "Docker's or the bake's own files are in the image"
   grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* \./etc/hosts$' "$1" || _bad "/etc/hosts is not the filesystem package's"
   grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* \./etc/resolv\.conf$' "$1" || _bad "/etc/resolv.conf is not the filesystem package's"
-  grep -Eq '^-r[-w]-r--r-- (root/root|0/0) +0 .* \./etc/machine-id$' "$1" || _bad "/etc/machine-id is not empty in the listing"
+  # No machine-id, as in the Debian images, in an /etc its owner can write: the session makes the file as the Linux user
+  # (fake uid 1000 under proot, which lifts permissions only for fake root), so systemd's empty 0444 file would refuse it.
+  grep -Eq '^drwxr-xr-x (root/root|0/0) .* \./etc/$' "$1" || _bad "/etc is not 0755 (the session writes /etc/machine-id there as its owner)"
+  ! grep -Eq ' \./etc/machine-id( -> .*)?$' "$1" || _bad "the image has an /etc/machine-id (the session makes one per device, as the Linux user)"
   grep -Eq '^lrwxrwxrwx (root/root|0/0) .* \./etc/mtab -> \.\./proc/self/mounts$' "$1" || _bad "/etc/mtab is not the filesystem package's link (../proc/self/mounts)"
   ! grep -Eq ' \./(var/lib/systemd/random-seed|var/lib/systemd/credential\.secret|etc/ssh/ssh_host_[^ ]*)$' "$1" \
     || _bad "the image carries a random seed, a credential secret or SSH host keys of the bake's own"
