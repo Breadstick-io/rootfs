@@ -87,6 +87,10 @@ for d in $DISTROS; do
   if echo "$out" | grep -qx root && echo "$out" | grep -qx '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'; then
     echo "ok   $d: run as root: Debian's root PATH"
   else echo "FAIL $d: run as root: $(echo "$out" | tr '\n' ' ')"; fails=$((fails + 1)); fi
+  # Last (it takes tester out of $g): a rule the user edited and a group the user left stay as they are (round 8,
+  # second review; vm-3.2 never touched either).
+  check "an edited rule and a left group survive the script" "printf '%%$g ALL=(ALL:ALL) ALL\\n' > /etc/sudoers.d/breadstick-vm && cp -a /etc/sudoers.d/breadstick-vm /tmp/s2 && gpasswd -d tester $g >/dev/null && if [ -f /tmp/account.sh ]; then sh /tmp/account.sh; else sh /t/prepare-user.sh; fi >/dev/null 2>&1; test \"\$(cksum < /tmp/s2)\" = \"\$(cksum < /etc/sudoers.d/breadstick-vm)\" && ! id -Gn tester | tr ' ' '\\n' | grep -qx $g"
+  check "a deleted rule is not put back" "rm -f /etc/sudoers.d/breadstick-vm && if [ -f /tmp/account.sh ]; then sh /tmp/account.sh; else sh /t/prepare-user.sh; fi >/dev/null 2>&1; test ! -e /etc/sudoers.d/breadstick-vm"
   docker rm -f "$name" >/dev/null
 done
 [ "$fails" = 0 ] && echo "ALL PASS" || { echo "$fails failed"; exit 1; }

@@ -2,7 +2,7 @@ set -u
 u='tester'
 etc='/etc'
 has() { getent group "$1" >/dev/null 2>&1; }
-admin=
+admin= made=
 for g in sudo wheel; do has "$g" && { admin=$g; break; }; done
 if ! id -u "$u" >/dev/null 2>&1; then
   groups=$admin
@@ -12,11 +12,10 @@ if ! id -u "$u" >/dev/null 2>&1; then
   [ -x "$sh" ] || sh=$(command -v bash 2>/dev/null) || sh=/bin/sh
   useradd -m -s "$sh" ${groups:+-G "$groups"} "$u" 2>/dev/null || useradd -m -s "$sh" ${admin:+-G "$admin"} "$u" || exit 1
   passwd -d "$u" >/dev/null 2>&1 || true
-elif [ -n "$admin" ] && ! id -Gn "$u" 2>/dev/null | tr ' ' '\n' | grep -qx "$admin"; then
-  usermod -aG "$admin" "$u" || true
+  made=1
 fi
 f="$etc/sudoers.d/breadstick-vm"
-if [ -n "$admin" ] && [ -d "$etc/sudoers.d" ] && ! grep -qsxF "%$admin ALL=(ALL:ALL) NOPASSWD: ALL" "$f"; then
+if [ -n "${made:-}" ] && [ -n "$admin" ] && [ -d "$etc/sudoers.d" ] && [ ! -e "$f" ] && [ ! -L "$f" ]; then
   printf '# Breadstick VM: members of %s run anything without a password, as in the Standard engine.\n%%%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$admin" "$admin" > "$f.tmp" &&
     chmod 0440 "$f.tmp" &&
     { ! command -v visudo >/dev/null 2>&1 || visudo -cqf "$f.tmp"; } &&
