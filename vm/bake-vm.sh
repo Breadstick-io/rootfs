@@ -10,8 +10,8 @@
 #
 # Output, in $OUT_DIR (default rootfs/dist/vm), named by stamp so a published copy never changes:
 #   debian-trixie-<arch>-vm-<stamp>/{vmlinuz, initrd.img, root.img.zst, image.json}
-#   manifest-vm-<arch>.json   the shape the app reads from cdn.breadstick.io/rootfs/ (NOT published
-#                             by this script; AutoBuild/deploy/rootfs-image.sh does not know it yet)
+#   manifest-vm-<arch>.json   the shape the app reads from cdn.breadstick.io/rootfs/ (published by
+#                             AutoBuild/deploy/vm-image.sh, which rebuilds it from image.json)
 # The app writes root.img sparse, extends it, and systemd grows the file system at first boot.
 set -eu
 
@@ -71,7 +71,19 @@ STAGE=$(mktemp -d "${TMPDIR:-/tmp}/bsl-vm-stage.XXXXXX")
 chmod 1777 "$STAGE"
 trap 'rm -rf "$STAGE"' EXIT
 log "building guest programs for $ARCH"
-docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/guest:/src:ro" -v "$STAGE:/out" "debian:$SUITE" sh -ec '
+# A foreign architecture runs from its own tag (AutoBuild tools/qemu-x86_64-setup.sh, 2026-10-25):
+# `docker run --platform linux/amd64 debian:trixie` on this arm64 host re-pulls debian:trixie AS
+# amd64, and every later native user of that tag (this script's own disk step, the gate, other
+# builds) then runs under qemu, or fails once binfmt is gone. Seen again on the 2026-11-10 bake.
+HOST_ARCH=$(dpkg --print-architecture)
+GUEST_IMG="debian:$SUITE"
+if [ "$ARCH" != "$HOST_ARCH" ]; then
+  GUEST_IMG="bsl-debian-$SUITE:$ARCH"
+  docker image inspect "$GUEST_IMG" >/dev/null 2>&1 || {
+    docker pull -q --platform "linux/$ARCH" "debian:$SUITE" >/dev/null && docker tag "debian:$SUITE" "$GUEST_IMG" &&
+      docker pull -q --platform "linux/$HOST_ARCH" "debian:$SUITE" >/dev/null; }
+fi
+docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/guest:/src:ro" -v "$STAGE:/out" "$GUEST_IMG" sh -ec '
   apt-get update -qq >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
   for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do
@@ -89,6 +101,10 @@ KEYRING="$STAGE/debian-archive-keyring.gpg"
 chmod -R a+rX "$STAGE"
 
 # 2. The system. sshfs mounts the app's shared folders (vm/PROTOCOL.md "Files").
+#    While Breadstick's packages install, the chroot's /run/bsl/engine says "vm": their
+#    /usr/lib/breadstick/bsl-engine (packages vm-3.2) reads it, and in a plain chroot it would answer
+#    "proot" and apply proot-only fixups (clearing executable stacks) to a VM image. Removed before
+#    the disk is made; in the VM /run is a tmpfs and the app writes the file through the agent.
 #    No recommends; XFCE as the desktop, and with DESKTOP=1 Breadstick's own desktop
 #    (breadstick-desktop from apt.breadstick.io: the look, the shell programs and the session
 #    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
@@ -137,15 +153,17 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --customize-hook="upload '$STAGE/breadstick.sources' /etc/apt/sources.list.d/breadstick.sources" \
   --customize-hook="$DEBUPD_HOOK" \
   --customize-hook="sed -i '/^Components:/a Architectures: $ARCH' \"\$1/etc/apt/sources.list.d/breadstick.sources\"" \
+  --customize-hook='mkdir -p "$1/run/bsl" && echo vm > "$1/run/bsl/engine"' \
   --customize-hook="if [ $DESKTOP = 1 ]; then chroot \"\$1\" apt-get update -q && DEBIAN_FRONTEND=noninteractive chroot \"\$1\" apt-get install -y -q breadstick-desktop; fi" \
   --customize-hook='printf "virtio_pci\nvirtio_blk\nvirtio_console\nvirtio_balloon\nvmw_vsock_virtio_transport\next4\n" >> "$1/etc/initramfs-tools/modules"; chroot "$1" update-initramfs -u -k all' \
+  --customize-hook='rm -f "$1/run/bsl/engine"; rmdir "$1/run/bsl" 2>/dev/null || true' \
   "$SUITE" "$STAGE/root.tar" "$MIRROR"
 
 # 3. The disk. mke2fs -d keeps ownership only when it runs as root, so the tree is unpacked and
 #    turned into ext4 in a container (Debian 13's e2fsprogs); the kernel and initramfs come out of
 #    the same tree. Native container: this step only moves data.
 log "making the ext4 disk"
-docker run --rm --platform "linux/$(dpkg --print-architecture)" -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
+docker run --rm --platform "linux/$HOST_ARCH" -e OWNER="$(id -u):$(id -g)" -v "$STAGE:/s" -v "$OUT:/o" "debian:$SUITE" sh -ec '
   command -v mke2fs >/dev/null || { apt-get update -qq >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq e2fsprogs >/dev/null; }
   mkdir /r
   tar -C /r --numeric-owner -xpf /s/root.tar
