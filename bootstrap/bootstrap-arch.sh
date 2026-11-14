@@ -65,10 +65,10 @@
 # CONTAINER_PREFIX names the containers and images this makes (default bsl-arch-bake); all are removed at exit.
 # FETCH_ONLY=1 downloads (or takes from the cache) and verifies the bootstrap tarball, then stops.
 #
-# Open (plan 5.12): the image ships pacman's keyring with Breadstick's and Arch's keys signed by a master key whose
-# secret half is gone, which verifies everything it holds but cannot sign a key archlinux-keyring adds later. A device
-# needs its own master key (`pacman-key --init`, which makes one when none is there) before its first Updates; nothing
-# does that yet.
+# The image ships pacman's keyring with Breadstick's and Arch's keys signed by a master key whose secret half is gone,
+# which verifies everything it holds but cannot sign a key (every pacman-key --populate fails without one). A device
+# makes its own master key before its first Updates: breadstick-session's bsl_pacman_keyring_init (pacman-key --init,
+# once), called by the app's setup-user.sh and by the session start (plan 5.12; the Arch session gate, 2026-11-14).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
