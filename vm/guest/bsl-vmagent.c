@@ -12,7 +12,7 @@
  *     u8 type, u32le len, data[len]
  * ending with an 'x' frame (i32le status) after which the guest closes. Ops:
  *     p  ping        -> o "PONG <uptime> <agent version>\n", x 0
- *     i  info        -> o "key=value\n"..., x 0
+ *     i  info        -> o "key=value\n"..., x 0 (os_id, os_version_id, os_id_like from os-release, since agent 2)
  *     t  set time    payload u64le Unix ms -> x 0 | errno
  *     f  write file  payload path \0 octal mode \0 data -> x 0 | errno (atomic: tmp + rename)
  *     o  power       payload "poweroff" | "reboot" -> x 0, then systemd is asked
@@ -24,6 +24,10 @@
  *                    The host closing the channel before the command ends hangs it up: SIGHUP to
  *                    its process group, SIGKILL 2 s later.
  * Users are read from /etc/passwd and /etc/group directly (fgetpwent/fgetgrent), not through NSS.
+ *
+ * Distribution-neutral (plan 5.14 V5): built static (bake-vm.sh: gcc -static), so one binary serves Debian,
+ * Fedora, Arch and NixOS whatever their libc; nothing here goes through NSS. The command search path and the
+ * systemctl used for power are the distribution's own (NixOS has neither /usr/bin nor /bin/systemctl).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -51,7 +55,7 @@
 #include <unistd.h>
 #include <linux/vm_sockets.h>
 
-#define AGENT_VERSION "1"
+#define AGENT_VERSION "2"
 #define MAX_PAYLOAD (1u << 20)
 #define MAX_PENDING (256 * 1024)
 
@@ -124,6 +128,54 @@ static void lookup_user(const char *name, struct user *u) {
         }
     }
     fclose(f);
+}
+
+/* ------------------------------------------------------------------------- distribution */
+
+/* NixOS: no FHS /usr/bin; programs come from the system profile, setuid wrappers from /run/wrappers. */
+static int is_nixos(void) {
+    return access("/etc/NIXOS", F_OK) == 0 || access("/run/current-system/sw/bin", X_OK) == 0;
+}
+
+/* The PATH a command gets: Debian's (unchanged since agent 1) on every FHS distribution, NixOS's own order
+ * (its /etc/profile: wrappers, the user's profiles, then the system's) there. A folder that does not exist
+ * costs nothing in PATH, so Fedora and Arch need no list of their own. */
+static void guest_path(const struct user *u, char *out, size_t n) {
+    if (is_nixos()) {
+        snprintf(out, n, "/run/wrappers/bin:%s/.nix-profile/bin:%s/.local/state/nix/profile/bin:/etc/profiles/per-user/%s/bin:"
+                 "/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin", u->home, u->home, u->name);
+        return;
+    }
+    snprintf(out, n, "%s", u->uid == 0 ? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                                       : "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games");
+}
+
+/* One os-release value (ID, VERSION_ID, ID_LIKE), quotes removed; "" when there is none. /etc/os-release
+ * first (it may be the distribution's link or Breadstick's own file), then /usr/lib/os-release. */
+static void os_release(const char *key, char *out, size_t n) {
+    out[0] = 0;
+    const char *files[] = { "/etc/os-release", "/usr/lib/os-release" };
+    size_t kl = strlen(key);
+    for (int i = 0; i < 2; i++) {
+        FILE *f = fopen(files[i], "re");
+        if (!f) continue;
+        char line[512];
+        int found = 0;
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, key, kl) != 0 || line[kl] != '=') continue;
+            char *v = line + kl + 1;
+            v[strcspn(v, "\n")] = 0;
+            size_t vl = strlen(v);
+            if (vl >= 2 && (v[0] == '"' || v[0] == '\'') && v[vl - 1] == v[0]) { v[vl - 1] = 0; v++; }
+            /* One line per key in the reply: nothing that could start another. */
+            for (char *c = v; *c; c++) if (*c == '\r' || (unsigned char)*c < 0x20) *c = ' ';
+            snprintf(out, n, "%s", v);
+            found = 1;
+            break;
+        }
+        fclose(f);
+        if (found) return;
+    }
 }
 
 /* The user's supplementary groups from /etc/group, then setgid/setuid. -1 on any failure. */
@@ -208,8 +260,9 @@ static void child_exec(const struct req *r, const struct user *u) {
     sigprocmask(SIG_SETMASK, &none, NULL);
     if (u->uid != 0 && u->uid != getuid() && become(u) < 0) { perror("bsl-vmagent: cannot switch user"); _exit(126); }
     clearenv();
-    setenv("PATH", u->uid == 0 ? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                               : "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games", 1);
+    char path[1024];
+    guest_path(u, path, sizeof path);
+    setenv("PATH", path, 1);
     setenv("HOME", u->home, 1);
     setenv("USER", u->name, 1);
     setenv("LOGNAME", u->name, 1);
@@ -409,8 +462,12 @@ static void info(int c) {
     char osr[128] = "";
     f = fopen("/etc/debian_version", "re");
     if (f) { if (!fgets(osr, sizeof osr, f)) osr[0] = 0; fclose(f); osr[strcspn(osr, "\n")] = 0; }
-    textf(c, "agent=%s\nkernel=%s\nmachine=%s\nhostname=%s\nuptime=%s\ndebian=%s\nsystemd=%d\n",
-          AGENT_VERSION, un.release, un.machine, un.nodename, up, osr, access("/run/systemd/system", F_OK) == 0);
+    char id[128], ver[128], like[256];
+    os_release("ID", id, sizeof id);
+    os_release("VERSION_ID", ver, sizeof ver);
+    os_release("ID_LIKE", like, sizeof like);
+    textf(c, "agent=%s\nkernel=%s\nmachine=%s\nhostname=%s\nuptime=%s\ndebian=%s\nsystemd=%d\nos_id=%s\nos_version_id=%s\nos_id_like=%s\n",
+          AGENT_VERSION, un.release, un.machine, un.nodename, up, osr, access("/run/systemd/system", F_OK) == 0, id, ver, like);
     status_frame(c, 0);
 }
 
@@ -420,7 +477,10 @@ static void power(int c, const char *what) {
     close(c);
     sync();
     if (access("/run/systemd/system", F_OK) == 0) {
-        execl("/bin/systemctl", "systemctl", rb ? "reboot" : "poweroff", (char *)NULL);
+        /* NixOS keeps systemctl in its system profile; Debian, Fedora and Arch in /usr/bin (and /bin). */
+        const char *sc[] = { "/run/current-system/sw/bin/systemctl", "/usr/bin/systemctl", "/bin/systemctl" };
+        for (int i = 0; i < 3; i++)
+            if (access(sc[i], X_OK) == 0) execl(sc[i], "systemctl", rb ? "reboot" : "poweroff", (char *)NULL);
     }
     reboot(rb ? RB_AUTOBOOT : RB_POWER_OFF);
     _exit(0);

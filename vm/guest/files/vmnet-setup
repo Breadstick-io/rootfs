@@ -11,7 +11,9 @@ ip route replace default dev bsl0
 # cannot reach shows up as a reset AFTER connecting, and programs do not fall back to the next
 # address. With no IPv6 route they get "network unreachable" at once and use IPv4, which Android
 # carries on IPv6-only networks too (464XLAT).
-nft -f /usr/lib/breadstick-vm/vmnet.nft
+# The rules beside this script: /usr/lib/breadstick-vm on Debian, Fedora and Arch, the package's store path
+# on NixOS (vm/guest/nixos/breadstick-vm.nix).
+nft -f "$(dirname "$0")/vmnet.nft"
 # resolv.conf is ours (bsl-vmnet answers on 127.0.0.1:53), unless /etc/breadstick-vm/own-resolv-conf
 # exists: then the user manages it.
 if [ ! -e /etc/breadstick-vm/own-resolv-conf ]; then

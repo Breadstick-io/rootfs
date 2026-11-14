@@ -6,6 +6,9 @@
 # clean power-off.
 #   vm/test/qemu-test.sh <image folder from bake-vm.sh> [arm64|amd64]
 #   STAGED_REPO=<stage> vm/test/qemu-test.sh ...   # first upgrade breadstick-desktop from a staged repo
+#   AGENT_DIR=<dir> vm/test/qemu-test.sh ...       # today's guest programs (vm/guest/build.sh) in the test's disk
+#   KERNEL=0 vm/test/qemu-test.sh ...              # skip the disk's-own-kernel test (it installs a kernel: 4 boots)
+#   CID=78 vm/test/qemu-test.sh ...                # the guest's vsock CID (default 77): one per test running at once
 # arm64 runs under KVM on an arm64 host; amd64 under TCG (slow). Needs the bsl-vmtest:3 image
 # (Debian 13 + qemu-system-arm/x86 + python3; Dockerfile beside this script).
 set -eu
@@ -17,6 +20,24 @@ trap 'cp "$work/console.log" "${KEEP_CONSOLE:-/dev/null}" 2>/dev/null; rm -rf "$
 zstd -q -dc "$IMG/root.img.zst" > "$work/root.img"
 truncate -s 8G "$work/root.img"
 cp "$IMG/vmlinuz" "$IMG/initrd.img" "$work/"
+# AGENT_DIR=<vm/guest/build.sh output>: today's guest programs (and vmnet-setup) in place of the image's, written into
+# the test's copy of the disk with debugfs, to test the sources on a published image (plan 5.14 V5). The published
+# image is never touched.
+AGENT_ENV=
+if [ -n "${AGENT_DIR:-}" ]; then
+  A_DIR=$(cd "$AGENT_DIR" && pwd)
+  cmds="$work/debugfs.cmds"
+  : > "$cmds"
+  for f in "$A_DIR/bsl-vmagent" "$A_DIR/bsl-vmnet" "$A_DIR/bsl-x11-relay" "$here/../guest/files/vmnet-setup"; do
+    case "$f" in *" "*) echo "AGENT_DIR: no spaces in paths, please ($f)" >&2; exit 2 ;; esac
+    [ -f "$f" ] || { echo "AGENT_DIR: no $f" >&2; exit 2; }
+    t="/usr/lib/breadstick-vm/$(basename "$f")"
+    printf 'rm %s\nwrite %s %s\nsif %s mode 0100755\nsif %s uid 0\nsif %s gid 0\n' "$t" "$f" "$t" "$t" "$t" "$t" >> "$cmds"
+  done
+  /sbin/debugfs -w -f "$cmds" "$work/root.img" >/dev/null 2>"$work/debugfs.err" || { cat "$work/debugfs.err" >&2; exit 1; }
+  /sbin/e2fsck -fn "$work/root.img" >/dev/null 2>&1 || { echo "the disk does not check clean after debugfs" >&2; exit 1; }
+  AGENT_ENV="-e AGENT=2"
+fi
 # The app's VM helpers (Android app/src/main/assets/vm), for the bridges test; skipped without them.
 ASSETS=${ANDROID_ASSETS:-$here/../../../Android/app/src/main/assets/vm}
 [ -d "$ASSETS" ] && A="-v $(cd "$ASSETS" && pwd):/a:ro" || A=
@@ -27,5 +48,5 @@ if [ -n "${STAGED_REPO:-}" ]; then
   [ -s "$STAGED_REPO/dists/${STAGED_SUITE:-breadstick}/InRelease" ] || { echo "STAGED_REPO $STAGED_REPO has no dists/${STAGED_SUITE:-breadstick}/InRelease" >&2; exit 2; }
   R="-v $(cd "$STAGED_REPO" && pwd):/repo:ro -e STAGED_SUITE=${STAGED_SUITE:-breadstick}"
 fi
-docker run --rm $A $R --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
+docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $AGENT_ENV -e KERNEL="${KERNEL:-1}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:3 python3 /t/qemu-test.py

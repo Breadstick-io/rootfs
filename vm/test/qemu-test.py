@@ -12,7 +12,9 @@ sys.path.insert(0, "/t")
 import bslvm  # noqa: E402
 
 ARCH = os.environ.get("ARCH", "arm64")
-CID = 77
+# The guest's vsock CID, host-wide: two tests with one CID clash, and the second one's requests would reach the first
+# one's VM. qemu-test.sh passes CID= (default 77); give each test running at once its own.
+CID = int(os.environ.get("CID", "77"))
 args = types.SimpleNamespace(unix=None, cid=CID)
 fails = []
 
@@ -37,17 +39,18 @@ else:
 cmdline = f"{console} root=/dev/vda rw panic=-1 bsl.vm=1"
 
 
-def boot(label=""):
-    """Starts QEMU on /w/root.img and waits for the agent. Returns the QEMU process."""
+def boot(label="", kernel="/w/vmlinuz", initrd="/w/initrd.img", wait=None, must=True):
+    """Starts QEMU on /w/root.img with [kernel] and [initrd] and waits for the agent. Returns the QEMU process, or
+    (must=False) None after killing it when the agent did not answer within [wait] seconds."""
     q = subprocess.Popen(qemu + [
-        "-m", "2048", "-smp", "4", "-kernel", "/w/vmlinuz", "-initrd", "/w/initrd.img", "-append", cmdline,
+        "-m", "2048", "-smp", "4", "-kernel", kernel, "-initrd", initrd, "-append", cmdline,
         "-drive", "file=/w/root.img,if=virtio,format=raw,discard=unmap", "-device", f"vhost-vsock-pci,guest-cid={CID}",
         "-nic", "none", "-display", "none", "-serial", f"file:/w/console{label}.log", "-monitor", "none",
     ])
     t0 = time.time()
     up = None
     last = None
-    while time.time() - t0 < (120 if ARCH == "arm64" else 900):
+    while time.time() - t0 < (wait or (120 if ARCH == "arm64" else 900)):
         try:
             out, st = bslvm.simple(args, "p")
             up = out.decode()
@@ -55,6 +58,12 @@ def boot(label=""):
         except OSError as e:
             last = e
             time.sleep(0.5)
+    if not must:
+        if up is None:
+            q.kill()
+            q.wait()
+            return None
+        return q
     check(f"agent answers{label}", up is not None and up.startswith("PONG"), f"{up!r} after {time.time() - t0:.1f}s")
     if up is None:
         print("last error:", last)
@@ -82,6 +91,13 @@ q = boot()
 
 out, st = bslvm.simple(args, "i")
 check("info", st == 0 and b"systemd=1" in out, out.decode().replace("\n", " "))
+# Agent 2 (plan 5.14 V5: static, os-release in 'i'), when qemu-test.sh put today's programs in (AGENT_DIR).
+if os.environ.get("AGENT") == "2":
+    info = dict(l.split("=", 1) for l in out.decode().splitlines() if "=" in l)
+    check("agent 2: version and os-release", info.get("agent") == "2" and info.get("os_id") in ("debian", "breadstick"),
+          f"agent={info.get('agent')} os_id={info.get('os_id')} os_version_id={info.get('os_version_id')} os_id_like={info.get('os_id_like')}")
+    o, st = run("for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do ldd /usr/lib/breadstick-vm/$p 2>&1 | grep -q 'not a dynamic' && echo $p static; done")
+    check("agent 2: the three programs are static", o.split().count("static") == 3, o.strip().replace("\n", " | "))
 out, st = bslvm.simple(args, "t", struct.pack("<Q", int(time.time() * 1000)))
 check("set time", st == 0)
 o, st = run("date +%s")
@@ -93,25 +109,20 @@ check("write file", st == 0 and o.split() == ["640", "hello"], o)
 o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend")
 check("systemd", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
 
-# The app's user preparation: a copy of Android vm/VmCommands.prepareUserScript("tester").
-PREPARE_USER = r"""
-set -u
-u='tester'
-if ! id -u "$u" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash -G sudo,audio,video,plugdev,users "$u" 2>/dev/null || useradd -m -s /bin/bash -G sudo "$u" || exit 1
-  passwd -d "$u" >/dev/null 2>&1 || true
-fi
-mkdir -p /run/bsl && echo vm > /run/bsl/engine
-uid=$(id -u "$u")
-loginctl enable-linger "$u" 2>/dev/null || true
-i=0
-while [ ! -S "/run/user/$uid/bus" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
-[ -S "/run/user/$uid/bus" ] && echo "bus ok" || echo "no user bus (session apps may complain)"
-"""
+# The app's user preparation: Android vm/VmCommands.prepareUserScript("tester"), copied in prepare-user.sh (the app's
+# VmCommandsTest checks the copy).
+PREPARE_USER = open("/t/prepare-user.sh").read()
 o, st = run(PREPARE_USER)
 check("prepare user", st == 0 and "bus ok" in o, o.strip())
 o, st = run("id -un; echo $XDG_RUNTIME_DIR; echo $DBUS_SESSION_BUS_ADDRESS; sudo -n true && echo sudo-ok", user="tester")
 check("user session", st == 0 and "tester" in o and "/run/user/" in o and "sudo-ok" in o, o.strip().replace("\n", " | "))
+# Plan 5.14 V6: Debian's result unchanged (the groups, the shell, the image's own sudoers rule) and the user's PATH.
+o, st = run("id -Gn tester; getent passwd tester | cut -d: -f7; loginctl show-user tester -p Linger; "
+            "cat /etc/sudoers.d/breadstick-vm; ls /etc/sudoers.d")
+check("user: Debian's groups, shell, linger and sudoers rule", all(x in o.split() for x in ("sudo", "audio", "video", "plugdev", "users"))
+      and "/bin/bash" in o and "Linger=yes" in o and "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" in o and ".tmp" not in o, o.strip().replace("\n", " | "))
+o, st = run("command -v xterm; command -v sudo", user="tester")
+check("user: which xterm and sudo", st == 0 and "/usr/bin/xterm" in o and "/usr/bin/sudo" in o, o.strip().replace("\n", " | "))
 
 o, st = run("tty; stty size", user="tester", pty=True)
 check("pty", st == 0 and "/dev/pts/" in o, o.strip().replace("\r\n", " | "))
@@ -549,6 +560,97 @@ if os.path.exists("/usr/bin/Xvfb"):
 
 files_test()
 
+BOOT_PAIR = open("/t/boot-pair.sh").read()
+
+
+def boot_pair():
+    """Android VmCommands.BOOT_PAIR_SCRIPT (copied in boot-pair.sh): (release, [sums], kernel, initrd) or None."""
+    o, st = run(BOOT_PAIR)
+    for l in o.splitlines():
+        w = l.split()
+        if len(w) == 6 and w[0] == "BSL_BOOT":
+            return w[1], w[2:4], w[4], w[5]
+    return None
+
+
+def sha256_file(p):
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+KERNEL = {}
+
+
+def kernel_prepare():
+    """Plan 5.14 V7, while the network is up: the disk boots the image's pair; a new kernel is installed the way a
+    user's update installs one, and the pair the disk now boots is copied out as the app does (boot-pair.sh, then cat)."""
+    if os.environ.get("KERNEL", "1") != "1":
+        print("SKIP kernel (KERNEL=0)")
+        return
+    p = boot_pair()
+    o, _ = run("uname -r")
+    check("kernel: the disk boots the image's pair", p is not None and p[0] == o.strip()
+          and p[1] == [sha256_file("/w/vmlinuz"), sha256_file("/w/initrd.img")], f"{p and p[0]} {p and p[2]}, running {o.strip()}")
+    if p is None:
+        return
+    KERNEL["old"] = p[0]
+    o, st = run("export DEBIAN_FRONTEND=noninteractive; a=$(dpkg --print-architecture); "
+                "c=$(apt-cache policy linux-image-$a | sed -n 's/ *Candidate: //p'); i=$(dpkg-query -W -f='${Version}' linux-image-$a); "
+                "if [ \"$c\" != \"$i\" ]; then pk=linux-image-$a; else pk=linux-image-rt-$a; fi; "
+                "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends $pk >/tmp/kernel.log 2>&1 && echo \"installed $pk\"; "
+                "tail -n 3 /tmp/kernel.log")
+    check("kernel: a new kernel installs", st == 0 and "installed" in o, o.strip().replace("\n", " | ")[-300:])
+    q2 = boot_pair()
+    check("kernel: the disk now boots another pair", q2 is not None and q2[0] != p[0], f"{q2 and q2[0]} ({q2 and q2[2]})")
+    if q2 is None or q2[0] == p[0]:
+        return
+    for i, (src, dst) in enumerate(((q2[2], "/w/next-vmlinuz"), (q2[3], "/w/next-initrd.img"))):
+        data, st = bslvm.run(args, "exec cat '" + src + "'", "root")
+        with open(dst, "wb") as f:
+            f.write(data)
+    ok = [sha256_file("/w/next-vmlinuz"), sha256_file("/w/next-initrd.img")] == q2[1]
+    check("kernel: the pair copies out through the agent, sums match", ok,
+          f"{os.path.getsize('/w/next-vmlinuz') >> 20} + {os.path.getsize('/w/next-initrd.img') >> 20} MiB")
+    if ok:
+        KERNEL["new"] = q2[0]
+
+
+def kernel_boots():
+    """Plan 5.14 V7, after the image's own pair booted the upgraded disk (the grown-disk boot): the copied pair boots
+    as the new kernel with networking; a broken kernel never answers, and the last good pair boots after it."""
+    if "new" not in KERNEL:
+        return
+    q = boot(" (new kernel)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
+    # After boot settles: the agent answers from sysinit, and under TCG bsl-vmnet's start job was still queued
+    # ("inactive") when this ran (amd64, 2026-11-14).
+    o, st = run("systemctl is-system-running --wait >/dev/null 2>&1; uname -r; systemctl is-active bsl-vmnet bsl-x11-relay; ip route | grep -c 'default dev bsl0'; "
+                "lsmod | grep -c -e '^nft_redir' -e '^dummy'")
+    w = o.split()
+    check("kernel: the new kernel runs, with its modules", w[:1] == [KERNEL["new"]] and w[1:3] == ["active", "active"]
+          and w[3:4] == ["1"] and w[4:5] == ["2"], o.strip().replace("\n", " | "))
+    o, _ = run("journalctl -k -b -o cat | grep -c -i -e 'recovery complete' -e 'orphan cleanup' || true")
+    check("power off left a clean journal (no ext4 replay at this boot)", o.strip() == "0", o.strip())
+    power_off(q, " (new kernel)")
+    with open("/w/next-vmlinuz", "rb") as f:
+        head = f.read(1 << 20)
+    with open("/w/bad-vmlinuz", "wb") as f:
+        f.write(head)
+    bad = boot(" (broken kernel)", kernel="/w/bad-vmlinuz", initrd="/w/next-initrd.img", wait=60 if ARCH == "arm64" else 240, must=False)
+    check("kernel: a broken kernel never brings the agent up", bad is None)
+    if bad is not None:
+        power_off(bad, " (broken kernel)")
+    q = boot(" (last good after the broken one)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
+    o, _ = run("uname -r")
+    check("kernel: the last good pair boots after it", o.strip() == KERNEL["new"], o.strip())
+    power_off(q, " (last good)")
+
+
+kernel_prepare()
+
 # The disk grows without losing anything (Android vm/VmDisk.kt): data written now must be there
 # after the app makes the file larger, and the file system must fill the larger disk.
 o, st = run("dd if=/dev/urandom of=/var/tmp/bsl-keep bs=1M count=8 status=none && sha256sum /var/tmp/bsl-keep | cut -d' ' -f1; "
@@ -578,7 +680,12 @@ if os.environ.get("GROW", "1") == "1":
         check("disk: the app's resize2fs step", st == 0 and ("Nothing to do" in o or "is now" in o), o.strip().replace("\n", " | "))
     check("disk: growing stored next to nothing", stored_mib("/w/root.img") - stored_before < 512,
           f"stored {stored_before} -> {stored_mib('/w/root.img')} MiB, length {before >> 20} -> {os.path.getsize('/w/root.img') >> 20} MiB")
+    if "new" in KERNEL:
+        o, _ = run("uname -r")
+        check("kernel: the image's own pair still boots the upgraded disk (Debian keeps the old modules)", o.strip() == KERNEL["old"], o.strip())
     power_off(q, " (grown disk)")
+
+kernel_boots()
 
 print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)

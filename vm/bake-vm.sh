@@ -65,35 +65,18 @@ PACKAGES="${PACKAGES:-$here/../../packages}"
 
 log() { printf '\033[1;34m[bake-vm]\033[0m %s\n' "$*"; }
 
-# 1. The guest programs, built against the guest's own libc (Debian 13 in a container of that
-#    architecture; amd64 runs under the host's qemu-user binfmt).
+# 1. The guest programs, built STATIC in Debian 13 (a container of that architecture; amd64 runs under the host's
+#    qemu-user binfmt): they read /etc/passwd themselves and use no NSS, so the same binaries serve the Debian,
+#    Fedora, Arch and NixOS images whatever their libc (plan 5.14 V5).
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/bsl-vm-stage.XXXXXX")
 chmod 1777 "$STAGE"
 trap 'rm -rf "$STAGE"' EXIT
 log "building guest programs for $ARCH"
-# A foreign architecture runs from its own tag (AutoBuild tools/qemu-x86_64-setup.sh, 2026-10-25):
-# `docker run --platform linux/amd64 debian:trixie` on this arm64 host re-pulls debian:trixie AS
-# amd64, and every later native user of that tag (this script's own disk step, the gate, other
-# builds) then runs under qemu, or fails once binfmt is gone. Seen again on the 2026-11-10 bake.
 HOST_ARCH=$(dpkg --print-architecture)
-GUEST_IMG="debian:$SUITE"
-if [ "$ARCH" != "$HOST_ARCH" ]; then
-  GUEST_IMG="bsl-debian-$SUITE:$ARCH"
-  docker image inspect "$GUEST_IMG" >/dev/null 2>&1 || {
-    docker pull -q --platform "linux/$ARCH" "debian:$SUITE" >/dev/null && docker tag "debian:$SUITE" "$GUEST_IMG" &&
-      docker pull -q --platform "linux/$HOST_ARCH" "debian:$SUITE" >/dev/null; }
-fi
-docker run --rm --platform "linux/$ARCH" -e OWNER="$(id -u):$(id -g)" -v "$here/guest:/src:ro" -v "$STAGE:/out" "$GUEST_IMG" sh -ec '
-  apt-get update -qq >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
-  for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do
-    gcc -O2 -Wall -pthread -o /out/$p /src/$p.c
-    strip /out/$p
-  done
-  chmod 755 /out/*
-  chown "$OWNER" /out/*'
-file "$STAGE/bsl-vmagent" | sed 's/^/  /'
-cp "$here"/guest/files/* "$STAGE"/
+# The guest tree (install.sh and its files) goes into the stage with the programs: in unshare mode the hooks run as a
+# mapped uid that cannot read under $HOME.
+cp -r "$here/guest" "$STAGE/guest"
+SUITE="$SUITE" sh "$here/guest/build.sh" "$ARCH" "$STAGE/guest/bin"
 cp "$here/../bootstrap/breadstick-archive-keyring.gpg" "$here/../bootstrap/breadstick.sources" "$STAGE"/
 # unshare mode reads it as a mapped uid: it must be somewhere world-readable, not under $HOME.
 cat "$KEYRING" > "$STAGE/debian-archive-keyring.gpg"
@@ -130,19 +113,8 @@ mmdebstrap --mode=unshare --arch="$ARCH" --variant=minbase --components=main \
   --keyring="$KEYRING" \
   --aptopt='Apt::Install-Recommends "false"' \
   --include="$INCLUDE" \
-  --customize-hook="mkdir -p \"\$1/usr/lib/breadstick-vm\"" \
-  --customize-hook="copy-in '$STAGE/bsl-vmagent' '$STAGE/bsl-vmnet' '$STAGE/bsl-x11-relay' '$STAGE/vmnet-setup' '$STAGE/vmnet.nft' /usr/lib/breadstick-vm" \
-  --customize-hook="copy-in '$STAGE/bsl-vmagent.service' '$STAGE/bsl-vmnet.service' '$STAGE/bsl-vmnet-setup.service' '$STAGE/bsl-x11-relay.service' /etc/systemd/system" \
-  --customize-hook="copy-in '$STAGE/fstab' /etc" \
+  --customize-hook="sh '$STAGE/guest/install.sh' \"\$1\" '$STAGE/guest/bin'" \
   --customize-hook="$CLOSE_HOOK" \
-  --customize-hook="upload '$STAGE/modules.conf' /etc/modules-load.d/breadstick-vm.conf" \
-  --customize-hook="mkdir -p \"\$1/etc/systemd/journald.conf.d\"" \
-  --customize-hook="upload '$STAGE/journald.conf' /etc/systemd/journald.conf.d/breadstick-vm.conf" \
-  --customize-hook="upload '$STAGE/sudoers' /etc/sudoers.d/breadstick-vm" \
-  --customize-hook="upload '$STAGE/profile.sh' /etc/profile.d/breadstick-vm.sh" \
-  --customize-hook="upload '$STAGE/zram-generator.conf' /etc/systemd/zram-generator.conf" \
-  --customize-hook='chmod 440 "$1/etc/sudoers.d/breadstick-vm"; chmod 755 "$1"/usr/lib/breadstick-vm/bsl-* "$1/usr/lib/breadstick-vm/vmnet-setup"' \
-  --customize-hook='chroot "$1" systemctl enable bsl-vmagent.service bsl-vmnet-setup.service bsl-vmnet.service bsl-x11-relay.service' \
   --customize-hook='chroot "$1" systemctl mask apt-daily.timer apt-daily-upgrade.timer serial-getty@ttyS0.service serial-getty@hvc0.service getty@tty1.service systemd-networkd-wait-online.service 2>/dev/null || true' \
   --customize-hook='if [ -e "$1/lib/systemd/system/systemd-networkd.service" ] || [ -e "$1/usr/lib/systemd/system/systemd-networkd.service" ]; then mkdir -p "$1/etc/systemd/network"; printf "[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n" > "$1/etc/systemd/network/80-breadstick-vm-tap.network"; chroot "$1" systemctl enable systemd-networkd.service; fi' \
   --customize-hook='echo breadstick-vm > "$1/etc/hostname"; printf "127.0.0.1 localhost\n127.0.1.1 breadstick-vm\n::1 localhost ip6-localhost ip6-loopback\n" > "$1/etc/hosts"' \
@@ -189,7 +161,7 @@ cat > "$OUT/image.json" <<EOF
   "arch": "$ARCH",
   "suite": "$SUITE",
   "kernel_version": "$KVER",
-  "agent": 1,
+  "agent": 2,
   "desktop": $([ "$DESKTOP" = 1 ] && echo true || echo false),
   "cmdline": "console=ttyS0 8250.nr_uarts=4 root=/dev/vda rw panic=-1 quiet",
   "files": {

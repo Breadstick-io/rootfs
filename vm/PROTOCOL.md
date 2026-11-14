@@ -1,7 +1,9 @@
 # Breadstick VM: guest programs and their vsock protocols
 
 The VM image (`bake-vm.sh`) carries three programs in `/usr/lib/breadstick-vm/`, each a systemd
-unit. The app's half is in Android `app/src/main/java/io/breadstick/vm/` (branch `vm-2.0`);
+unit. They are built static (agent 2, plan 5.14 V5), so the same binaries serve Debian, Fedora, Arch and NixOS;
+`guest/install.sh ROOT` puts them, the units and the VM's settings into any of the first three, and
+`guest/nixos/breadstick-vm.nix` is the same as a NixOS module. The app's half is in Android `app/src/main/java/io/breadstick/vm/` (branch `vm-2.0`);
 `test/bslvm.py` is a reference host used to test the guest without a device.
 
 Rules that shape all three, from W0 (Android docs/2.0/vm.md):
@@ -21,7 +23,7 @@ Every exchange ends with an `x` frame (`i32` status) and the guest closing.
 | op | payload | reply |
 |---|---|---|
 | `p` ping | none | `o` "PONG <uptime> <agent version>\n", `x` 0 |
-| `i` info | none | `o` key=value lines (agent, kernel, machine, hostname, uptime, debian, systemd), `x` 0 |
+| `i` info | none | `o` key=value lines (agent, kernel, machine, hostname, uptime, debian, systemd; since agent 2 also os_id, os_version_id, os_id_like from os-release), `x` 0 |
 | `t` time | `u64` Unix ms | `x` 0 or errno |
 | `f` write file | path `\0` octal mode `\0` data | `x` 0 or errno (tmp file + rename, O_NOFOLLOW) |
 | `o` power | `poweroff` or `reboot` | `x` 0, then `systemctl poweroff/reboot` |
@@ -29,7 +31,11 @@ Every exchange ends with an `x` frame (`i32` status) and the guest closing.
 
 `r` keys: `user` (default root), `pty=1`, `cols`, `rows`, `cwd`, `term`, `env=K=V` (repeatable).
 An empty command with `pty=1` is the user's login shell; otherwise `/bin/sh -c command`. Users are
-read from `/etc/passwd` and `/etc/group` directly. A non-root user gets `XDG_RUNTIME_DIR` and
+read from `/etc/passwd` and `/etc/group` directly. The command gets the distribution's PATH: Debian's on every
+FHS system (root: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, a user:
+`/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games`), and on NixOS (`/etc/NIXOS`) `/run/wrappers/bin`, the
+user's profiles and `/run/current-system/sw/bin`. `o` runs the first systemctl of
+`/run/current-system/sw/bin`, `/usr/bin`, `/bin`, else the kernel's reboot(). A non-root user gets `XDG_RUNTIME_DIR` and
 `DBUS_SESSION_BUS_ADDRESS` when their systemd user session runs (the app enables linger).
 
 During `r`: host to guest `d` stdin data (at most 64 KiB a frame), `e` stdin EOF (^D on a pty),
@@ -114,4 +120,11 @@ includes it). Measured: arm64 KVM with OpenSSH's sftp-server as the host, 600-83
 gcc -O2 -DTEST_HOST_PATH='"/tmp/a.sock"' -o /tmp/agent guest/bsl-vmagent.c && /tmp/agent &
 test/bslvm.py --unix /tmp/a.sock run 'id; uname -a'
 test/qemu-arm64.sh <image folder>      # boots the image under KVM with vhost-vsock (Docker)
+guest/build.sh arm64 /tmp/bin && AGENT_DIR=/tmp/bin test/qemu-test.sh <image folder> arm64   # today's programs on a published image
+test/guest-distros.sh                   # install.sh, the units, the user script and the agent on Debian, Fedora and Arch
 ```
+
+`test/prepare-user.sh` and `test/boot-pair.sh` are copies of Android `VmCommands.prepareUserScript("tester")` and
+`VmCommands.BOOT_PAIR_SCRIPT` (Android's VmCommandsTest checks its own copies). qemu-test.py's kernel test (plan 5.14
+V7) installs a newer kernel in the VM, copies the pair the disk then boots out through the agent as the app does,
+boots it, boots a truncated kernel (which must never answer), and boots the copied pair again.
