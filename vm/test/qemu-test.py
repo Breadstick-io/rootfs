@@ -564,7 +564,8 @@ BOOT_PAIR = open("/t/boot-pair.sh").read()
 
 
 def boot_pair():
-    """Android VmCommands.BOOT_PAIR_SCRIPT (copied in boot-pair.sh): (release, [sums], kernel, initrd) or None."""
+    """Android VmCommands.BOOT_PAIR_SCRIPT (copied in boot-pair.sh): (release, [sums], kernel, initrd) or None. A 7th
+    word, NixOS's init, is not expected on the Debian image this test boots."""
     o, st = run(BOOT_PAIR)
     for l in o.splitlines():
         w = l.split()

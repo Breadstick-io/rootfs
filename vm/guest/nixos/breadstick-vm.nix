@@ -111,6 +111,14 @@ in
       export MESA_VK_WSI_DEBUG=noshm
     '';
 
+    # The kernel and initrd come from the app (crosvm boots them directly, no bootloader), and NixOS's stage 1 needs
+    # init= on the kernel line. /sbin/init runs the system profile's newest generation, what `nixos-rebuild boot` or
+    # `switch` made the next boot: the image's own pair boots with `init=/sbin/init` in its manifest's cmdline (V4). A
+    # pair the app copied from the disk names its own generation's init (Android VmCommands.BOOT_PAIR_SCRIPT, the 7th
+    # word), which the app puts in place of the manifest's (VmSizing.params), so kernel and generation always match.
+    boot.loader.grub.enable = lib.mkDefault false;
+    boot.loader.initScript.enable = lib.mkDefault true;
+
     # The agent hands commands to /bin/sh (NixOS keeps it: environment.binsh).
     systemd.services.systemd-networkd-wait-online.enable = lib.mkDefault false;
   };

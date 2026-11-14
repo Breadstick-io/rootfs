@@ -1,7 +1,10 @@
-k= i= r=
+k= i= r= n=
 pick() { [ -f "$1" ] && [ -f "$2" ] && k=$(readlink -f "$1") && i=$(readlink -f "$2"); }
-if [ -e /run/current-system/kernel ]; then
-  pick /run/current-system/kernel /run/current-system/initrd && r=$(ls /run/current-system/kernel-modules/lib/modules 2>/dev/null | head -n 1)
+s=/nix/var/nix/profiles/system
+[ -e "$s/kernel" ] || s=/run/current-system
+if [ -e "$s/kernel" ]; then
+  s=$(readlink -f "$s")
+  pick "$s/kernel" "$s/initrd" && [ -x "$s/init" ] && n=$s/init && r=$(ls "$s/kernel-modules/lib/modules" 2>/dev/null | head -n 1)
 elif pick /vmlinuz /initrd.img || pick /boot/vmlinuz /boot/initrd.img; then
   r=${k##*/vmlinuz-}
 elif [ -f /boot/vmlinuz-linux ]; then
@@ -14,4 +17,4 @@ else
 fi
 [ -n "$k" ] && [ -n "$i" ] && [ -n "$r" ] || { echo "BSL_BOOT none"; exit 3; }
 set -- $(sha256sum "$k" "$i" | cut -d' ' -f1)
-echo "BSL_BOOT $r $1 $2 $k $i"
+echo "BSL_BOOT $r $1 $2 $k $i${n:+ $n}"
