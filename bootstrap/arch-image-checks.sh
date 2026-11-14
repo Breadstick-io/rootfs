@@ -41,10 +41,12 @@ bsl_arch_listing_check() {
     || _bad "Docker's or the bake's own files are in the image"
   grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* \./etc/hosts$' "$1" || _bad "/etc/hosts is not the filesystem package's"
   grep -Eq '^-rw-r--r-- (root/root|0/0) +[1-9][0-9]* .* \./etc/resolv\.conf$' "$1" || _bad "/etc/resolv.conf is not the filesystem package's"
-  # No machine-id, as in the Debian images, in an /etc its owner can write: the session makes the file as the Linux user
-  # (fake uid 1000 under proot, which lifts permissions only for fake root), so systemd's empty 0444 file would refuse it.
+  # No machine-id, in an /etc its owner can write: the session makes the file as the Linux user (fake uid 1000 under
+  # proot, which lifts permissions only for fake root), so systemd's empty 0444 file would refuse it. This is THIS
+  # image's choice: Debian's images ship an empty 0644 file and Fedora's keep theirs that way, which the Linux user can
+  # write too. Do not carry this refusal over to them.
   grep -Eq '^drwxr-xr-x (root/root|0/0) .* \./etc/$' "$1" || _bad "/etc is not 0755 (the session writes /etc/machine-id there as its owner)"
-  ! grep -Eq ' \./etc/machine-id( -> .*)?$' "$1" || _bad "the image has an /etc/machine-id (the session makes one per device, as the Linux user)"
+  ! grep -Eq ' \./etc/machine-id( -> .*)?$' "$1" || _bad "the image has an /etc/machine-id (this image ships none; the session makes one per device, as the Linux user)"
   grep -Eq '^lrwxrwxrwx (root/root|0/0) .* \./etc/mtab -> \.\./proc/self/mounts$' "$1" || _bad "/etc/mtab is not the filesystem package's link (../proc/self/mounts)"
   ! grep -Eq ' \./(var/lib/systemd/random-seed|var/lib/systemd/credential\.secret|etc/ssh/ssh_host_[^ ]*)$' "$1" \
     || _bad "the image carries a random seed, a credential secret or SSH host keys of the bake's own"
