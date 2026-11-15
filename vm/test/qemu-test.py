@@ -949,6 +949,10 @@ def proot_restore_test():
     q = boot(" (for the proot restore)")
     # Made after the image's list and not in the backup: the restore takes it away (round 9 review).
     run("echo after > /etc/r9-after-image.conf")
+    # The image's folder modes (Fedora's /root is 0550, Arch's 0750, Debian's 0700) and the VM's own machine id, which
+    # the restore keeps (a proot system's is empty: laid over the VM's it made the next boot a first boot).
+    image_modes, _ = run("stat -c %a /var/tmp /root")
+    vm_id, _ = run("cat /etc/machine-id")
     st, o = stream_in(open("/t/file-unpack-proot.sh").read(), "/w/proot.tar")
     check("proot restore: unpacked into the stage, owners root's", st == 0, f"exit {st} {o.strip()[-200:]}")
     o, st = run(open("/t/file-restore-proot.sh").read())
@@ -965,11 +969,15 @@ def proot_restore_test():
     # the VM's hosts file, and nothing the backup does not have.
     o, st = run("head -c 4 /usr/bin/systemctl | od -An -c | tr -d ' '; for f in /usr/local/bin/systemctl /usr/local/bin/setpriv "
                 "/usr/sbin/policy-rc.d /etc/r9-after-image.conf; do test -e $f && echo has:$f; done; stat -c %a /var/tmp /root; "
-                "grep -c breadstick-vm /etc/hosts")
-    # /root: the image's mode, Fedora's 0550 (bake-vm-distro.sh) or 0700.
+                "grep -c breadstick-vm /etc/hosts; cat /etc/machine-id")
+    # /var/tmp and /root: the modes the image had before the restore (--no-overwrite-dir).
+    want = image_modes.split()[:2]
     check("proot restore: the image's programs, folder modes and hosts; what came after the image is gone",
-          o.split()[:1] == ["177ELF"] and "has:" not in o and o.split()[1:4] == ["1777", "550" if DISTRO == "fedora" else "700", "1"],
-          o.strip().replace("\n", " | "))
+          o.split()[:1] == ["177ELF"] and "has:" not in o and len(want) == 2 and want[0] == "1777"
+          and o.split()[1:4] == want + ["1"],
+          o.strip().replace("\n", " | ") + f" (image: {' '.join(want)})")
+    check("proot restore: the VM keeps its machine id", vm_id.strip() != "" and o.split()[4:5] == [vm_id.strip()],
+          f"before {vm_id.strip()!r}, after {o.split()[4:5]}")
     o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '")
     check("proot restore: systemd after it", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
     power_off(q, " (proot restore done)")

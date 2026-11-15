@@ -25,6 +25,8 @@ printf 'image only\n' > /usr/share/bsl-image-only.txt
 chgrp shadow /etc/shadow && chmod 640 /etc/shadow
 printf 'image\n' > /usr/share/bsl-image-group.txt && chgrp mail /usr/share/bsl-image-group.txt && chmod 2755 /usr/share/bsl-image-group.txt
 chmod 1777 /var/tmp && chmod 0700 /root
+# The VM's own identity; a proot system's is empty (round 9 review: laid over the VM's, it made the next boot a first boot).
+printf '0123456789abcdef0123456789abcdef\n' > /etc/machine-id
 useradd -m -u 1000 -s /bin/sh tester 2>/dev/null
 sh /t/image-files.sh > /tmp/r1 2>&1
 say image-files "$(cat /tmp/r1) $(gzip -dc /var/lib/breadstick-vm/image-files.gz | grep -cx '/usr/share/bsl-image-only.txt')"
@@ -48,6 +50,7 @@ printf 'from the backup\n' > "$P/etc/bsl-from-backup.conf"
 printf 'kept\n' > "$P/home/tester/keep.txt"
 printf 'backup copy\n' > "$P/usr/share/bsl-image-group.txt"
 printf '127.0.0.1 localhost proot\n' > "$P/etc/hosts"
+: > "$P/etc/machine-id"
 mkdir -p "$P/usr/local/bin"
 for t in systemctl systemd-tmpfiles dpkg-statoverride; do
     printf '#!/bin/sh\nexit 0\n' > "$P/usr/local/bin/$t"; cp "$P/usr/local/bin/$t" "$P/usr/bin/$t"
@@ -84,6 +87,7 @@ say proot-modes "$(mode /var/tmp) $(mode /root) $(mode /home/tester) $(stat -c %
 say proot-owners "$(stat -c %G /etc/shadow) $(stat -c '%G %a' /usr/share/bsl-image-group.txt) $(cat /usr/share/bsl-image-group.txt)"
 say proot-guest "$(cat /usr/lib/breadstick-vm/bsl-vmagent) $(yn test -L /etc/systemd/system/multi-user.target.wants/bsl-vmagent.service) $(yn test -f /etc/systemd/system/bsl-vmagent.service)"
 say proot-hosts "$(grep -c proot /etc/hosts)"
+say proot-machine-id "$(cat /etc/machine-id)"
 say proot-files "$(yn test -f /etc/bsl-from-backup.conf) $(yn test ! -e /etc/bsl-after-image.conf) $(yn test ! -e /opt/bsl-after) $(yn test ! -e /home/tester/after.txt) $(yn test -f /usr/share/bsl-image-only.txt) $(yn test -f /etc/hosts.vm)"
 say proot-left "$(yn test ! -e $S) $(yn test ! -e /var/lib/breadstick-vm/restore.work) $(yn test -s /var/lib/breadstick-vm/image-files.gz)"
 
@@ -95,6 +99,8 @@ printf 'after\n' > /home/tester/vm-after.txt
 printf 'after\n' > /etc/bsl-vm-after.conf
 rm -f /home/tester/vm-keep.txt /etc/bsl-from-backup.conf
 chmod 0711 /home/tester
+# Restored into another VM: that VM's identity stays.
+printf 'fedcba9876543210fedcba9876543210\n' > /etc/machine-id
 sh /t/file-unpack-vm.sh < /tmp/vm.tar > /tmp/u2.log 2>&1
 say vm-unpack-rc "$?"
 sh /t/file-restore.sh > /tmp/r2.log 2>&1
@@ -102,6 +108,7 @@ say vm-restore-rc "$?"
 say vm-files "$(cat /home/tester/vm-keep.txt) $(stat -c %U /home/tester/vm-keep.txt) $(yn test -f /etc/bsl-from-backup.conf) $(yn test ! -e /home/tester/vm-after.txt) $(yn test ! -e /etc/bsl-vm-after.conf) $(mode /home/tester)"
 say vm-guest "$(cat /usr/lib/breadstick-vm/bsl-vmagent) $(yn test -L /etc/systemd/system/multi-user.target.wants/bsl-vmagent.service) $(mode /var/tmp)"
 say vm-left "$(yn test ! -e $S) $(yn test ! -e /var/lib/breadstick-vm/restore.work)"
+say vm-machine-id "$(cat /etc/machine-id)"
 # 4. A stage with no system in it is refused and nothing is taken away.
 mkdir -p $S && printf 'x\n' > $S/x
 sh /t/file-restore.sh > /tmp/r3.log 2>&1

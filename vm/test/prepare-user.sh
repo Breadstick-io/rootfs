@@ -32,8 +32,15 @@ chgrp "$(id -g "$u")" /run/bsl 2>/dev/null && chmod 1775 /run/bsl
 # per-user one also loads breadstick.pa, took the stream port first, and the app played
 # its silence while every program played into the session's (Lenovo, 2026-10-08).
 [ -L /etc/systemd/user/pulseaudio.socket ] || systemctl --global mask pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true
-loginctl enable-linger "$u" 2>/dev/null || true
 i=0
-while [ ! -S "/run/user/$uid/bus" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+while [ ! -S /run/dbus/system_bus_socket ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done
+[ -S /run/dbus/system_bus_socket ] || echo "no system bus"
+i=0
+until loginctl enable-linger "$u" 2>/dev/null; do
+  [ $i -lt 50 ] || { echo "no linger for $u"; break; }
+  sleep 0.2; i=$((i+1))
+done
+i=0
+while [ ! -S "/run/user/$uid/bus" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 [ -S "/run/user/$uid/bus" ] && echo "bus ok" || echo "no user bus (session apps may complain)"
 systemctl --user -M "$u@" stop pulseaudio.socket pulseaudio.service >/dev/null 2>&1 || true
