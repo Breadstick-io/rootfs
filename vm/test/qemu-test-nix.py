@@ -78,6 +78,8 @@ try:
     s = json.loads(o.strip().splitlines()[-1])
 except Exception:
     s = {}
+o2, st2 = run("/run/current-system/sw/bin/bsl-nix channel stable && test -w /etc/breadstick/nix/packages.json && echo writable")
+check("the page's files are writable", st2 == 0 and "writable" in o2, o2.strip()[-200:])
 check("bsl-nix status: the vm engine, generation 1", s.get("engine") == "vm" and s.get("generation") == 1, o.strip()[-300:])
 o, st = run("bash -lc \"ls -d /nix/store/*-nixpkgs-* | head -1; nix-instantiate --eval -E '(import <nixpkgs> {}).hello.version'\"")
 check("nixpkgs is in the image and evaluates", st == 0 and '"' in o, o.strip().replace("\n", " | ")[-200:])
@@ -95,6 +97,19 @@ o, st = run("getent hosts channels.nixos.org")
 check("dns through the host", st == 0 and o.strip() != "", o.strip())
 o, st = run("/run/current-system/sw/bin/bsl-nix check")
 check("bsl-nix check (the channel through the host)", st == 0 and o.strip().splitlines()[-1:] in (["0"], ["1"]), o.strip()[-200:])
+
+# The Nix packages page in the VM (X2): add, apply through switch-to-configuration (systemd is PID 1), roll back, gc.
+B = "/run/current-system/sw/bin/bsl-nix"
+t1 = time.time()
+o, st = run(f"{B} add hello && {B} apply 2>&1 | grep -E '^\\[BSL\\]'")
+check("apply in the VM", st == 0 and "switching to" in o and "applied: generation 2" in o,
+      f"{time.time() - t1:.0f} s: " + o.strip().replace("\n", " | ")[-300:])
+o, st = run("hello", user="tester")
+check("hello as the user after the apply", o.strip() == "Hello, world!", o.strip()[-200:])
+o, st = run(f"{B} rollback 2>&1 | tail -2; command -v hello || echo gone")
+check("roll back in the VM", st == 0 and "rolled back to generation 1" in o and "gone" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run(f"{B} gc 2>&1 | tail -2")
+check("gc in the VM", st == 0 and "freed" in o, o.strip().replace("\n", " | ")[-200:])
 
 bslvm.simple(args, "o", b"poweroff")
 try:

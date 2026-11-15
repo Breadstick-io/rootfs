@@ -3,16 +3,19 @@
 # partition table (crosvm boots the kernel and initrd beside it directly; the root is /dev/vda, grown at first boot),
 # made by nixpkgs' make-disk-image. Built by vm/bake-vm-nix.sh in the nixos/nix container, never on a device.
 #
-#   nix-build vm-image.nix --arg nixpkgs /nix/store/...-nixpkgs --argstr system aarch64-linux
+#   nix-build vm-image.nix --argstr nixpkgs /nix/store/...-nixpkgs --argstr system aarch64-linux
 { nixpkgs, system, configuration ? /etc/nixos/configuration.nix, breadstickNix ? /etc/breadstick/nix }:
 let
-  eval = import (nixpkgs + "/nixos/lib/eval-config.nix") {
+  # The store path itself, never a copy of it: a path value would be imported again under another name (round 9: the
+  # disk then held <hash>-<hash>-nixpkgs-... and /etc/breadstick/nix/nixpkgs pointed at nothing).
+  np = builtins.storePath nixpkgs;
+  eval = import (np + "/nixos/lib/eval-config.nix") {
     inherit system;
     modules = [ configuration ];
   };
   inherit (eval) config pkgs;
   lib = pkgs.lib;
-  image = import (nixpkgs + "/nixos/lib/make-disk-image.nix") {
+  image = import (np + "/nixos/lib/make-disk-image.nix") {
     inherit config pkgs lib;
     name = "breadstick-nix-vm";
     format = "raw";
@@ -25,10 +28,12 @@ let
     # /sbin/init (boot.loader.initScript): the kernel line's init= runs the newest generation.
     installBootLoader = true;
     # nixpkgs itself, so the first apply in the VM evaluates without a download (as in the proot image).
-    additionalPaths = [ nixpkgs ];
+    additionalPaths = [ np ];
     # Breadstick's own files, as the proot image has them: the configuration, its sources and the page's list.
     contents = [
-      { source = breadstickNix; target = "/etc/breadstick/nix"; }
+      # Writable by root, as on the proot image (bsl-nix edits packages.json and local.json): copied from the store,
+      # every file would be read-only.
+      { source = breadstickNix; target = "/etc/breadstick/nix"; mode = "u+w"; }
       { source = configuration; target = "/etc/nixos/configuration.nix"; }
     ];
   };
@@ -40,5 +45,5 @@ pkgs.runCommand "breadstick-nix-vm-files" { } ''
   ln -s ${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile} $out/initrd.img
   echo ${config.system.build.toplevel} > $out/toplevel
   echo ${config.boot.kernelPackages.kernel.modDirVersion} > $out/kernel-version
-  echo ${nixpkgs} > $out/nixpkgs
+  echo ${np} > $out/nixpkgs
 ''

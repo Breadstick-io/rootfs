@@ -24,7 +24,8 @@ trap cleanup EXIT
 cp "$SETUP_USER" "$W/setup-user.sh"
 cat > "$W/run.sh" <<'BSL_NIXTEST_RUN_END'
 #!/bin/sh
-# In the image's own NixOS, as root. PATH as the app gives a Nix system (GuestEnv.NIX_PATH).
+# In the image's own NixOS, as root. PATH as the app gives a Nix system (GuestEnv.NIX_PATH). Docker binds its own
+# /etc/hosts, /etc/hostname and /etc/resolv.conf over the image's: NixOS's hosts is read from /etc/static.
 export PATH=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin
 P=/nix/var/nix/profiles/system/sw/bin
 fails=0
@@ -36,7 +37,7 @@ t $P/bsl-nix boot > /tmp/boot.log 2>&1; check "bsl-nix boot" $? "$(tail -1 /tmp/
 [ -s /etc/machine-id ]; check "boot made a machine id" $?
 [ -x /run/wrappers/bin/sudo ] && [ -u "$(readlink -f /run/wrappers/bin/sudo)" -o -u /run/wrappers/bin/sudo ]; check "setuid sudo wrapper" $?
 [ -d /usr/local/bin ] && [ ! -L /usr/local/bin ] && [ ! -L /usr/local/sbin ] && command -v xfce4-session >/dev/null && \
-  [ -e /usr/lib/breadstick/start-desktop-x11.sh ] && [ -e /usr/share/zoneinfo/Europe/Paris ] && grep -q breadstick /etc/hosts
+  [ -e /usr/lib/breadstick/start-desktop-x11.sh ] && [ -e /usr/share/zoneinfo/Europe/Paris ] && grep -q breadstick /etc/static/hosts
 check "the paths Breadstick systems have" $?
 grep -q '^ID=nixos' /etc/os-release; check "os-release says nixos" $?
 [ "$(cat /etc/breadstick/version)" = "$(cat /etc/breadstick/nix/src/VERSION)" ]; check "Breadstick's version in /etc" $? "$(cat /etc/breadstick/version)"

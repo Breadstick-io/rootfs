@@ -160,7 +160,7 @@ printf '{\n  "channel": "stable",\n  "path": "%s",\n  "release": "%s",\n  "sha25
   "$NP_PATH" "$RELEASE" "$NP_SHA" "$NIXPKGS_URL" > /etc/breadstick/nix/nixpkgs.json
 export NIX_PATH="nixpkgs=/etc/breadstick/nix/nixpkgs:nixos-config=/etc/nixos/configuration.nix"
 echo "[vmstep] building the VM image for $NIXSYS"
-V=$(nix-build /cfg/vm-image.nix --arg nixpkgs "$NP_PATH" --argstr system "$NIXSYS" --no-out-link)
+V=$(nix-build /cfg/vm-image.nix --argstr nixpkgs "$NP_PATH" --argstr system "$NIXSYS" --no-out-link)
 mkdir -p /out/vm
 for f in vmlinuz initrd.img; do cp -L "$V/$f" /out/vm/$f; done
 cp -L "$V/root.img" /out/vm/root.img
