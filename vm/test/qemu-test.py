@@ -920,5 +920,33 @@ if os.environ.get("GROW", "1") == "1":
 
 kernel_boots()
 
+
+def proot_restore_test():
+    """Plan 5.14 V20, the other way: a proot system (PROOT_IMAGE, decompressed by qemu-test.sh into /w/proot.tar, the
+    files a proot backup of it holds) restored into the VM as the app does it (file-unpack-proot.sh: everything root's,
+    homes to their accounts; file-restore.sh over the system), then booted: the VM's guest and kernel stay the image's,
+    the system's own files are the proot system's, the app's user script makes its account again, and sudo works."""
+    if not os.path.exists("/w/proot.tar"):
+        return
+    q = boot(" (for the proot restore)")
+    st, o = stream_in(open("/t/file-unpack-proot.sh").read(), "/w/proot.tar")
+    check("proot restore: unpacked into the stage, owners root's", st == 0, f"exit {st} {o.strip()[-200:]}")
+    o, st = run(open("/t/file-restore.sh").read())
+    check("proot restore: laid over the system", st == 0 and "restored" in o, o.strip()[-300:])
+    power_off(q, " (proot restored)")
+    q = boot(" (after the proot restore)")
+    o, st = run(PREPARE_USER)
+    check("proot restore: the account is made again, its bus up", st == 0 and "bus ok" in o, o.strip()[-200:])
+    o, st = run("sudo -n true && echo sudo-ok; . /etc/os-release; echo \"$NAME|$ID\"; systemctl is-active bsl-vmagent bsl-vmnet; "
+                "test -e /var/lib/breadstick-vm/restore || echo no-stage; stat -c '%U %a' /usr/bin/sudo", user="tester")
+    check("proot restore: sudo, the system's identity, the VM guest, no stage", "sudo-ok" in o and "active\nactive" in o
+          and "no-stage" in o and "root" in o, o.strip().replace("\n", " | "))
+    o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '")
+    check("proot restore: systemd after it", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
+    power_off(q, " (proot restore done)")
+
+
+proot_restore_test()
+
 print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
 sys.exit(1 if fails else 0)
