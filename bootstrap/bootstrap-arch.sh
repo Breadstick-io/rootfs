@@ -58,8 +58,8 @@
 # 2026-11-14, over the cache limit); trimmed takes them out after the desktop step (its own trim step, in a container
 # from the finished desktop one); auto exports it with both first and trims it only when that image is at or over the
 # limit. Trimmed means: every file under /usr/share/doc, man, info and gtk-doc, and every language's folder under
-# /usr/share/locale and /usr/share/help but English (en, en_US; help's C) deleted, files and links only (never a
-# recursive delete); glibc's locale sources (/usr/share/i18n), X11's locale data and every program's own files stay,
+# /usr/share/locale and /usr/share/help but English (en, en_US; help's C) and Breadstick's own packages' files (its
+# translations, in every language, as on Fedora) deleted, files and links only (never a recursive delete); glibc's locale sources (/usr/share/i18n), X11's locale data and every program's own files stay,
 # and so does pacman.conf without NoExtract, so everything installed or updated later brings its documentation and
 # every language. pacman -Qk then lists those files as missing, which the checks allow under those paths only.
 # /etc/breadstick/image-trimmed says so. Nothing syncs by itself on Arch (decision 11), so the user's language comes
@@ -285,15 +285,25 @@ if [ "$STEP" = trim ]; then
         [ -d "$d" ] && [ ! -L "$d" ] || continue
         find "$d" -mindepth 1 \( -type f -o -type l \) -delete
     done
+    # Breadstick's own translations stay (breadstick-theme's breadstick.mo, in 35 languages: the launcher, the
+    # notification center, Updates and the other Linux programs), as on the trimmed Fedora image, whose Breadstick
+    # packages carry no %lang: nothing syncs on Arch, so a trim that took them out left those programs in English until
+    # the user ran Updates (round 8 review 3). Its documentation goes, as rpm's doc flag takes it on Fedora.
+    keep=/tmp/bsl-trim-keep
+    pacman -Qq 2>/dev/null | grep -E '^breadstick(-|$)' | xargs -r pacman -Qlq 2>/dev/null | grep -v '/$' | sort -u > "$keep"
+    grep -Eq '^/usr/share/locale/de/LC_MESSAGES/breadstick\.mo$' "$keep" || { echo "no Breadstick translation is installed to keep" >&2; exit 1; }
     for d in /usr/share/locale /usr/share/help; do
         [ -d "$d" ] && [ ! -L "$d" ] || continue
         for l in "$d"/*/; do
             l=${l%/}
             [ -d "$l" ] && [ ! -L "$l" ] || continue
             case "${l##*/}" in en|en_US|C) continue ;; esac
-            find "$l" -mindepth 1 \( -type f -o -type l \) -delete
+            find "$l" -mindepth 1 \( -type f -o -type l \) | grep -vxFf "$keep" | xargs -r -d '\n' rm -f --
         done
     done
+    missing=$(grep -E '^/usr/share/(locale|help)/' "$keep" | while IFS= read -r f; do [ -e "$f" ] || [ -L "$f" ] || echo "$f"; done)
+    [ -z "$missing" ] || { echo "the trim took out Breadstick's own translations: $missing" >&2; exit 1; }
+    rm -f "$keep"
     [ -s /usr/share/i18n/SUPPORTED ] && [ -d /usr/share/i18n/locales ] || { echo "glibc's locale sources are gone" >&2; exit 1; }
     ! pacman-conf NoExtract | grep -q . || { echo "pacman.conf has NoExtract" >&2; exit 1; }
     mkdir -p /etc/breadstick
@@ -547,10 +557,12 @@ cat /tmp/qkk /tmp/qkk.err | grep -E '^backup file: |\((UID|GID|Permissions) mism
 : > /tmp/qkk.rest
 # A trimmed image: the files the trim step took out (documentation, and every language but English), which pacman
 # still lists, taken out of the stream first in one pass (tens of thousands of lines: a loop of greps per line takes
-# most of an hour under qemu). Nothing else may be missing; an English one is never allowed.
+# most of an hour under qemu). Nothing else may be missing; an English one, or one of Breadstick's own packages
+# (its translations stay in a trimmed image), is never allowed.
 if [ -n "$TRIMMED" ]; then
     cat /tmp/qkk /tmp/qkk.err > /tmp/qkk.all
-    grep -E '^warning: [^:]+: /usr/share/(locale|help)/(en|en_US|C)/' /tmp/qkk.all > /tmp/qkk.en || true
+    grep -E -e '^warning: [^:]+: /usr/share/(locale|help)/(en|en_US|C)/' \
+        -e '^warning: breadstick(-[^:]*)?: /usr/share/(locale|help)/' /tmp/qkk.all > /tmp/qkk.en || true
     grep -Ev -e '^[^ :]+: [0-9]+ total files, [0-9]+ missing files?$' \
         -e '^warning: [^:]+: /usr/share/(doc|man|info|gtk-doc)/[^ ]+ \(No such file or directory\)$' \
         -e '^warning: [^:]+: /usr/share/(locale|help)/[^/ ]+/[^ ]+ \(No such file or directory\)$' /tmp/qkk.all > /tmp/qkk.kept || true
@@ -661,6 +673,8 @@ if [ -n "$TRIMMED" ]; then
         'test ! -e /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test ! -e /usr/share/man/man1/bash.1.gz && pacman -Qlq coreutils | grep -qx /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test -x /usr/bin/bash'
     check "trimmed: glibc's locale sources and X11's locale data stay (the session makes the user's locale offline)" sh -c \
         'test -s /usr/share/i18n/SUPPORTED && test -f /usr/share/i18n/locales/de_DE && test -d /usr/share/X11/locale/en_US.UTF-8'
+    check "trimmed: Breadstick's own translations stay, every language (breadstick-theme's breadstick.mo, German among them)" sh -c \
+        'pacman -Qlq breadstick-theme | grep -x "/usr/share/locale/de/LC_MESSAGES/breadstick\.mo" >/dev/null && pacman -Qlq breadstick-theme | grep -E "^/usr/share/locale/[^/]+/LC_MESSAGES/breadstick\.mo$" > /tmp/bslmo && test "$(wc -l < /tmp/bslmo)" -ge 30 && ! while read -r f; do test -s "$f" || echo "$f"; done < /tmp/bslmo | grep .'
 else
     check "translations and manuals on disk (coreutils' German .mo, bash's man page)" sh -c \
         'test -s /usr/share/locale/de/LC_MESSAGES/coreutils.mo && test -s /usr/share/man/man1/bash.1.gz'

@@ -58,13 +58,25 @@ drwxrwxrwt 0/0               0 2026-11-14 03:10 ./var/tmp/
 BSL_TEST_ARCH_LISTING_5e1b
 if out="$(bsl_arch_listing_check "$T/good")"; then ok "a good listing passes"; else bad "a good listing is refused: $out"; fi
 
-# A trimmed desktop image (DOCS_LANGS): no German, no manual pages, and the marker; and the marker never on a full one.
-sed -e '/locale\/de\/LC_MESSAGES/d' -e '$a -rw-r--r-- 0/0             300 2026-11-14 21:48 ./etc/breadstick/image-trimmed' "$T/good" > "$T/list"
+# A trimmed desktop image (DOCS_LANGS): no German but Breadstick's own breadstick.mo, no manual pages, and the marker;
+# and the marker never on a full one.
+BMO='-rw-r--r-- 0/0            9800 2026-11-14 21:40 ./usr/share/locale/de/LC_MESSAGES/breadstick.mo'
+MARK='-rw-r--r-- 0/0             300 2026-11-14 21:48 ./etc/breadstick/image-trimmed'
+sed -e '/locale\/de\/LC_MESSAGES/d' -e "\$a $BMO" -e "\$a $MARK" "$T/good" > "$T/list"
 if out="$(bsl_arch_listing_check "$T/list" trimmed)"; then ok "a trimmed listing passes as trimmed"; else bad "a trimmed listing is refused: $out"; fi
 if out="$(bsl_arch_listing_check "$T/list")"; then bad "a trimmed listing passes as a full one"; else ok "a trimmed listing is refused as a full one ($(printf '%s' "$out" | paste -sd ';' -))"; fi
 if out="$(bsl_arch_listing_check "$T/good" trimmed)"; then bad "a full listing passes as trimmed"; else ok "a full listing is refused as trimmed ($(printf '%s' "$out" | paste -sd ';' -))"; fi
-sed '/locale\/de\/LC_MESSAGES/d' "$T/good" > "$T/list"
+sed -e '/locale\/de\/LC_MESSAGES/d' -e "\$a $BMO" "$T/good" > "$T/list"
 if out="$(bsl_arch_listing_check "$T/list" trimmed)"; then bad "a trimmed listing without its marker passes"; else ok "a trimmed listing without its marker is refused ($out)"; fi
+# Round 8 review 3: the trim took Breadstick's own translations out too; a trimmed image must keep them.
+sed -e '/locale\/de\/LC_MESSAGES/d' -e "\$a $MARK" "$T/good" > "$T/list"
+if out="$(bsl_arch_listing_check "$T/list" trimmed)"; then bad "a trimmed listing without Breadstick's breadstick.mo passes"
+else case "$out" in *"Breadstick's own German translation"*) ok "a trimmed listing without Breadstick's breadstick.mo is refused ($out)" ;;
+     *) bad "a trimmed listing without breadstick.mo is refused for another reason: $out" ;; esac; fi
+sed -e "\$a $BMO" -e "\$a $MARK" "$T/good" > "$T/list"
+if out="$(bsl_arch_listing_check "$T/list" trimmed)"; then bad "a trimmed listing with coreutils' German passes"
+else case "$out" in "a trimmed image still has German translations other than Breadstick's") ok "a trimmed listing with coreutils' German beside breadstick.mo is refused ($out)" ;;
+     *) bad "a trimmed listing with coreutils' German is refused for another reason: $out" ;; esac; fi
 
 listing_case() {  # $1 = what, $2 = sed expression that breaks the good listing, $3 = text the refusal must have
   sed "$2" "$T/good" > "$T/list"

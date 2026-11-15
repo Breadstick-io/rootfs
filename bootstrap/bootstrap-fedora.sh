@@ -343,6 +343,10 @@ if [ -n "$TRIMMED" ]; then
     check "trimmed: bash's man page and German are left out, its English is there" sh -c \
         'test ! -e /usr/share/man/man1/bash.1.gz && test ! -e /usr/share/locale/de/LC_MESSAGES/bash.mo && rpm -q --qf "[%{FILESTATES:fstate} %{FILENAMES}\n]" bash | grep -q "^not installed /usr/share/locale/de/LC_MESSAGES/bash.mo$" && test -x /usr/bin/bash'
     check "trimmed: glibc's English locale is there (glibc-langpack-en, C.UTF-8)" sh -c 'locale -a | grep -qix en_US.utf8 && locale -a | grep -qix c.utf8'
+    # As on the trimmed Arch image (round 8 review 3): Breadstick's own translations stay, every language (its rpms
+    # carry no %lang, so the bake's language setting leaves them in; this keeps it that way).
+    check "trimmed: Breadstick's own translations stay, every language (breadstick-theme's breadstick.mo, German among them)" sh -c \
+        'rpm -ql breadstick-theme | grep -x "/usr/share/locale/de/LC_MESSAGES/breadstick\.mo" >/dev/null && rpm -ql breadstick-theme | grep -E "^/usr/share/locale/[^/]+/LC_MESSAGES/breadstick\.mo$" > /tmp/bslmo && test "$(wc -l < /tmp/bslmo)" -ge 30 && ! while read -r f; do test -s "$f" || echo "$f"; done < /tmp/bslmo | grep .'
 else
     check "no file rpm left out (file state 'not installed'): documentation and translations are on disk" sh -c \
         '! rpm -qa --qf "[%{FILESTATES:fstate} %{=NAME} %{FILENAMES}\n]" | grep "^not installed"'

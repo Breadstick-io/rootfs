@@ -67,11 +67,15 @@ bsl_arch_listing_check() {
   # Hard links kept as hard links, as in the Debian images (the app makes them again when it unpacks).
   grep -Eq '^h.* \./[^ ]+ link to \./' "$1" || _bad "the image has no hard links (they were not kept)"
   grep -Eq ' \./usr/share/i18n/SUPPORTED$' "$1" || _bad "the locale list (/usr/share/i18n/SUPPORTED) is not in the image"
-  # A trimmed desktop image ($2 = trimmed, bootstrap-arch.sh's DOCS_LANGS): no translation but English, and it says so;
-  # every other image has every language and no such marker.
+  # A trimmed desktop image ($2 = trimmed, bootstrap-arch.sh's DOCS_LANGS): no translation but English and Breadstick's
+  # own (breadstick.mo, in every language: nothing syncs on Arch, round 8 review 3), and it says so; every other image
+  # has every language and no such marker.
   if [ "${2:-}" = trimmed ]; then
     grep -Eq ' \./etc/breadstick/image-trimmed$' "$1" || _bad "a trimmed image without /etc/breadstick/image-trimmed"
-    ! grep -Eq ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" || _bad "a trimmed image still has German translations"
+    ! grep -E ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" | grep -Evq ' \./usr/share/locale/de/LC_MESSAGES/breadstick\.mo$' \
+      || _bad "a trimmed image still has German translations other than Breadstick's"
+    grep -Eq '^-[^ ]+ (root/root|0/0) +[1-9][0-9]* .* \./usr/share/locale/de/LC_MESSAGES/breadstick\.mo$' "$1" \
+      || _bad "a trimmed image without Breadstick's own German translation (breadstick.mo: the trim keeps Breadstick's translations)"
     ! grep -Eq ' \./usr/share/man/man1/[^ ]+$' "$1" || _bad "a trimmed image still has manual pages"
   else
     grep -Eq ' \./usr/share/locale/de/LC_MESSAGES/[^ ]+\.mo$' "$1" || _bad "translations under /usr/share/locale are not in the image"
