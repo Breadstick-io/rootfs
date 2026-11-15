@@ -24,8 +24,8 @@ trap cleanup EXIT
 cp "$SETUP_USER" "$W/setup-user.sh"
 cat > "$W/run.sh" <<'BSL_NIXTEST_RUN_END'
 #!/bin/sh
-# In the image's own NixOS, as root. PATH as the app gives every Breadstick system (GuestEnv.PATH).
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# In the image's own NixOS, as root. PATH as the app gives a Nix system (GuestEnv.NIX_PATH).
+export PATH=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin
 P=/nix/var/nix/profiles/system/sw/bin
 fails=0
 check() { if [ "$2" = 0 ]; then echo "PASS $1${3:+: $3}"; else echo "FAIL $1${3:+: $3}"; fails=$((fails + 1)); fi; }
@@ -35,7 +35,9 @@ t() { s=$(date +%s); "$@"; r=$?; echo "  ($(( $(date +%s) - s )) s)"; return $r;
 t $P/bsl-nix boot > /tmp/boot.log 2>&1; check "bsl-nix boot" $? "$(tail -1 /tmp/boot.log)"
 [ -s /etc/machine-id ]; check "boot made a machine id" $?
 [ -x /run/wrappers/bin/sudo ] && [ -u "$(readlink -f /run/wrappers/bin/sudo)" -o -u /run/wrappers/bin/sudo ]; check "setuid sudo wrapper" $?
-[ -L /usr/local/bin ] && [ -x /usr/local/bin/xfce4-session ] && [ -e /usr/lib/breadstick/start-desktop-x11.sh ]; check "the paths Breadstick systems have" $?
+[ -d /usr/local/bin ] && [ ! -L /usr/local/bin ] && [ ! -L /usr/local/sbin ] && command -v xfce4-session >/dev/null && \
+  [ -e /usr/lib/breadstick/start-desktop-x11.sh ] && [ -e /usr/share/zoneinfo/Europe/Paris ] && grep -q breadstick /etc/hosts
+check "the paths Breadstick systems have" $?
 grep -q '^ID=nixos' /etc/os-release; check "os-release says nixos" $?
 [ "$(cat /etc/breadstick/version)" = "$(cat /etc/breadstick/nix/src/VERSION)" ]; check "Breadstick's version in /etc" $? "$(cat /etc/breadstick/version)"
 # The shell programs' Python finds GTK 3 (GI_TYPELIB_PATH from the system's environment, as a login shell gets it), and
@@ -52,7 +54,7 @@ check "the desktop's programs" ${miss:-0}
 printf 'secret1\n' | sh /t/setup-user.sh tester > /tmp/user.log 2>&1; r=$?
 check "setup-user.sh" $r "$(tail -1 /tmp/user.log)"
 $P/bsl-nix account tester > /tmp/acct.log 2>&1; check "bsl-nix account" $? "$(tail -1 /tmp/acct.log)"
-o=$(su tester -s /bin/sh -c 'PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin; sudo -n id -u' 2>&1); [ "$o" = 0 ]; check "sudo -n as the user" $? "$o"
+o=$(su tester -s /bin/sh -c 'PATH=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin; sudo -n id -u' 2>&1); [ "$o" = 0 ]; check "sudo -n as the user" $? "$o"
 
 s=$($P/bsl-nix status --json); echo "$s" | grep -q '"generation": 1'; check "status: generation 1" $? "$s"
 $P/bsl-nix add 'hello; reboot' > /tmp/bad.log 2>&1; check "a bad name is refused" $(( $? != 2 )) "$(tail -1 /tmp/bad.log)"

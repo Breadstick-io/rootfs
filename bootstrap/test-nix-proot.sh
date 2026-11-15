@@ -43,7 +43,7 @@ echo "[unpack]"; s=$(date +%s)
 zstd -dc /w/image.tar.zst | tar -xpf - -C $R --no-same-owner 2>$G/tar.err; echo "  tar rc=$? ($(( $(date +%s) - s )) s, $(wc -l < $G/tar.err) error lines)"
 # DNS as the app gives it (LinuxEnvironment writes the guest's resolv.conf; the image has none).
 cp /etc/resolv.conf $R/etc/resolv.conf
-GP=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games
+GP=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin
 B="/w/bin/proot --kill-on-exit --link2symlink --sysvipc"
 BINDS="-r $R -b /dev -b /proc -b /sys -b $G/shm:/dev/shm -b $G/share:/mnt/host"
 asroot() { $B -0 $BINDS -w /root /usr/bin/env -i HOME=/root USER=root LOGNAME=root PATH=$GP TERM=xterm-256color LANG=C.UTF-8 /bin/bash -lc "$1"; }
