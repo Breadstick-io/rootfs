@@ -58,6 +58,9 @@
 # update: those images are named fedora-...-staged-<stamp>.tar.zst and must never be published. Without RPM_STAGE the
 # repository is https://rpm.breadstick.io (breadstick-release's own file, untouched).
 #
+# CONTAINER_PREFIX names the containers and images this makes (default bsl-fedora-bake; the check's are
+# <prefix>-verify), as bootstrap-arch.sh's does; all are removed at exit.
+#
 # MANIFEST_DIR (optional): write manifest-fedora-<arch>[-desktop].json for each image there (version, file, size,
 # sha256, arch, distro), the names the 4.0 app reads (RootfsDownloader.manifestName, plan 5.11), for a LOCAL check. Refused inside the workspace's mirror and
 # anywhere under AutoBuild/dist.
@@ -114,6 +117,8 @@ name_of() {  # $1 = base|desktop
   echo "$OUT_DIR/$n-$STAMP.tar.zst"
 }
 
+PREFIX="${CONTAINER_PREFIX:-bsl-fedora-bake}"
+case "$PREFIX" in bsl-[a-z0-9-]*) ;; *) echo "ERROR: CONTAINER_PREFIX must start with bsl-" >&2; exit 1 ;; esac
 WORK="$(mktemp -d)"
 CONTAINERS=()
 IMAGES=()
@@ -270,7 +275,7 @@ if not seen_hosts:
 BSL_FEDORA_FILTER_7d41
 
 run_step() {  # $1 = base|desktop, $2 = image to start from, $3 = 1 for a trimmed one; leaves the container's name in $C
-  C="bsl-fedora-bake-$1-$ARCH-$$${3:+-trimmed}"
+  C="$PREFIX-$1-$ARCH-$$${3:+-trimmed}"
   CONTAINERS+=("$C")
   log "Fedora $RELEASE $ARCH: $1 step in $C${3:+ (trimmed: no documentation, English only)}"
   docker create --name "$C" --platform "linux/$ARCH" "${MOUNT[@]}" -v "$HERE:/bsl-key:ro" -v "$WORK/bake.sh:/bake.sh:ro" \
@@ -381,7 +386,7 @@ reject() {  # $1 = the image as written (<name>.unchecked), $2 = why: it becomes
 }
 OVER_LIMIT=()
 verify_image() {  # $1 = base|desktop, $2 = tarball (written as $2.unchecked, renamed $2 when it passes), $3 = 1: trimmed
-  local t="$2.unchecked" v="bsl-fedora-verify-$1-$ARCH-$$" img="bsl-fedora-verify:$1-$ARCH-$STAMP-$$" why
+  local t="$2.unchecked" v="$PREFIX-verify-$1-$ARCH-$$" img="$PREFIX-verify:$1-$ARCH-$STAMP-$$" why
   log "checking $(basename "$2")"
   if why="$(bsl_fedora_size_check "$t")"; then
     log "$why"
@@ -423,7 +428,7 @@ if [ "$WHAT" != desktop ]; then
   export_image "$BASE_C" "$BASE_T"
 fi
 desktop_from() {  # $1 = the base step's container, $2 = 1 for a trimmed image: the desktop step on it, exported
-  local step_img="bsl-fedora-bake:base-$ARCH-$STAMP-$$${2:+-trimmed}"
+  local step_img="$PREFIX:base-$ARCH-$STAMP-$$${2:+-trimmed}"
   IMAGES+=("$step_img")
   docker commit "$1" "$step_img" >/dev/null
   run_step desktop "$step_img" "${2:-}"
