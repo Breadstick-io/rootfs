@@ -40,7 +40,7 @@ else:
 # The image's own line, its console swapped for QEMU's machine's.
 line = " ".join(w for w in manifest["cmdline"].split() if not w.startswith("console=") and w != "quiet")
 cmdline = f"{console} {line} bsl.vm=1"
-check("the kernel line names the system's init", "init=/sbin/init" in cmdline, cmdline)
+check("the kernel line names the system profile's init", "init=/nix/var/nix/profiles/system/init" in cmdline, cmdline)
 check("image.json says nix", manifest.get("distro") == "nix", str(manifest.get("distro")))
 
 q = subprocess.Popen(qemu + [
@@ -79,7 +79,7 @@ try:
 except Exception:
     s = {}
 check("bsl-nix status: the vm engine, generation 1", s.get("engine") == "vm" and s.get("generation") == 1, o.strip()[-300:])
-o, st = run("ls -d /nix/store/*-nixpkgs-* | head -1; nix-instantiate --eval -E '(import <nixpkgs> {}).hello.version'")
+o, st = run("bash -lc \"ls -d /nix/store/*-nixpkgs-* | head -1; nix-instantiate --eval -E '(import <nixpkgs> {}).hello.version'\"")
 check("nixpkgs is in the image and evaluates", st == 0 and '"' in o, o.strip().replace("\n", " | ")[-200:])
 
 PREPARE_USER = open("/t/prepare-user.sh").read()

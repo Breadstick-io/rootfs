@@ -9,8 +9,10 @@
 # vm (plan 5.14 V4): the same configuration with "engine": "vm" as a virtual machine image, through nixpkgs'
 # make-disk-image (vm/nixos/vm-image.nix; the build boots a helper VM, so /dev/kvm is passed in: arm64 on this host,
 # amd64 would run its helper under TCG for hours): OUT_DIR/vm/nixos-26.05-<arch>-vm-<stamp>/{vmlinuz, initrd.img,
-# root.img.zst, image.json} as bake-vm.sh writes Debian's, the kernel line's init=/sbin/init (the module's
-# boot.loader.initScript), "distro": "nix", and with MANIFEST_DIR a local manifest-vm-nix-<arch>.json (the app reads
+# root.img.zst, image.json} as bake-vm.sh writes Debian's, "distro": "nix", the kernel line's
+# init=/nix/var/nix/profiles/system/init (NixOS 26.05's systemd stage 1 resolves it to the newest generation's closure;
+# /sbin/init, a script, is no closure to it) and no root= (stage 1 mounts / from the configuration's fileSystems, and a
+# root= beside it is a second sysroot.mount), and with MANIFEST_DIR a local manifest-vm-nix-<arch>.json (the app reads
 # only Debian's manifest-vm-<arch>.json from the CDN today; a per-distribution name is V4's, plan 5.14). Test it with
 # vm/test/qemu-test-nix.sh.
 #
@@ -344,7 +346,7 @@ if [ "$WHAT" = vm ]; then
   "kernel_version": "$KVER",
   "agent": 2,
   "desktop": true,
-  "cmdline": "console=ttyS0 8250.nr_uarts=4 root=/dev/vda rw panic=-1 quiet init=/sbin/init",
+  "cmdline": "console=ttyS0 8250.nr_uarts=4 panic=-1 quiet init=/nix/var/nix/profiles/system/init",
   "files": {
     "kernel": { "name": "vmlinuz", "sha256": "$(sha "$VOUT/vmlinuz")", "size": $(size "$VOUT/vmlinuz") },
     "initrd": { "name": "initrd.img", "sha256": "$(sha "$VOUT/initrd.img")", "size": $(size "$VOUT/initrd.img") },

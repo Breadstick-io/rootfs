@@ -112,8 +112,11 @@ in
     '';
 
     # The kernel and initrd come from the app (crosvm boots them directly, no bootloader), and NixOS's stage 1 needs
-    # init= on the kernel line. /sbin/init runs the system profile's newest generation, what `nixos-rebuild boot` or
-    # `switch` made the next boot: the image's own pair boots with `init=/sbin/init` in its manifest's cmdline (V4). A
+    # init= on the kernel line. The image's own pair boots with `init=/nix/var/nix/profiles/system/init` in its
+    # manifest's cmdline (V4; round 9: NixOS 26.05's systemd stage 1 resolves that link to the newest generation, what
+    # `nixos-rebuild boot` or `switch` made the next boot, and takes its folder as the closure; /sbin/init, which
+    # initScript still writes for anything else that wants one, is a script, no closure to it). No root= beside it: stage
+    # 1 mounts / from fileSystems below, and a root= is a second sysroot.mount. A
     # pair the app copied from the disk names its own generation's init (Android VmCommands.BOOT_PAIR_SCRIPT, the 7th
     # word), which the app puts in place of the manifest's (VmSizing.params), so kernel and generation always match.
     boot.loader.grub.enable = lib.mkDefault false;
