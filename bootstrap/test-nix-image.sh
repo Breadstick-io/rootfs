@@ -98,10 +98,17 @@ $P/bsl-nix add no-such-package-xyz > /tmp/bad2.log 2>&1; check "a missing packag
 $P/bsl-nix add vscode > /tmp/bad3.log 2>&1; r=$?; grep -q "not free software" /tmp/bad3.log || r=0
 check "an unfree package is refused" $(( r == 0 )) "$(grep 'vscode' /tmp/bad3.log | tail -1)"
 [ -z "$($P/bsl-nix packages)" ]; check "the list is still empty" $?
-$P/bsl-nix add hello > /tmp/add.log 2>&1; check "add hello" $? "$(tail -1 /tmp/add.log)"
-[ "$($P/bsl-nix packages)" = hello ]; check "the page's list" $?
-t $P/bsl-nix apply > /tmp/apply.log 2>&1; r=$?; check "apply" $r "$(tail -2 /tmp/apply.log | head -1)"
+# The first change as Get apps, the website's Install and MCP make it: install (add and apply as one). On an image baked
+# without documentation it brings documentation back (round 9 review: only apply lifted the trim). add and apply on
+# their own are checked below (after gc, and through switch-to-configuration).
+trimmed=0; grep -q '"imageTrim": true' /etc/breadstick/nix/local.json && trimmed=1
+t $P/bsl-nix install hello > /tmp/apply.log 2>&1; r=$?; check "install hello" $r "$(tail -2 /tmp/apply.log | head -1)"
 [ $r = 0 ] || tail -30 /tmp/apply.log
+[ "$($P/bsl-nix packages)" = hello ]; check "the page's list" $?
+if [ $trimmed = 1 ]; then
+  ! grep -q '"imageTrim": true' /etc/breadstick/nix/local.json && [ -n "$(ls /run/current-system/sw/share/man/man1 2>/dev/null)" ]
+  check "a trimmed image's first install brings documentation back" $? "$(ls /run/current-system/sw/share/man/man1 2>/dev/null | wc -l) pages in man1"
+fi
 command -v hello >/dev/null && [ "$(hello)" = "Hello, world!" ]; check "hello runs from the PATH" $?
 $P/bsl-nix query hello | grep -q "STATUS: install ok installed"; check "query: hello installed" $?
 G1=$(readlink /nix/var/nix/profiles/system)
@@ -111,6 +118,10 @@ t $P/bsl-nix rollback > /tmp/rb.log 2>&1; check "rollback" $? "$(tail -2 /tmp/rb
 [ "$(readlink /nix/var/nix/profiles/system)" = "$G0" ] && ! command -v hello >/dev/null; check "back on the one before, hello gone" $?
 o=$($P/bsl-nix query hello); echo "$o" | grep -q STATUS; check "query: hello not installed after the rollback" $(( $? == 0 ))
 t $P/bsl-nix rollback 1 > /tmp/rb2.log 2>&1; check "back to generation 1" $? "$(tail -2 /tmp/rb2.log | head -1)"
+# Generation 1 is from before German was filled in: the next start must not build forward again (round 9 review).
+$P/bsl-nix languages > /tmp/lang3.log 2>&1; r=$?
+[ $r = 4 ] && grep -q "rolled back to" /tmp/lang3.log && [ "$(readlink /nix/var/nix/profiles/system)" = system-1-link ]
+check "languages never undo a rollback" $? "rc $r: $(grep 'languages:' /tmp/lang3.log | tail -1)"
 $P/bsl-nix rollback > /tmp/rb2b.log 2>&1; check "no generation before 1" $(( $? == 0 )) "$(tail -1 /tmp/rb2b.log)"
 t $P/bsl-nix rollback "$(echo "$G1" | sed 's/system-//; s/-link//')" > /tmp/rb3.log 2>&1; check "forward again" $? "$(tail -2 /tmp/rb3.log | head -1)"
 # install: add and apply as one; what does not build leaves the list as it was.

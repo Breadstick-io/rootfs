@@ -1,5 +1,5 @@
 # The Breadstick VM guest as a NixOS module (plan 5.14 V5): what vm/guest/install.sh puts into a Debian, Fedora or
-# Arch image, in NixOS's own terms. Written 2026-11-14; NOT built yet (the Nix VM image is V4's, after X1).
+# Arch image, in NixOS's own terms. Written 2026-11-14; built into the Nix VM image (bootstrap-nix.sh vm) since round 9.
 #
 #   imports = [ ./breadstick-vm.nix ];
 #   breadstick.vm.enable = true;
@@ -37,6 +37,13 @@ let
   # Never the out-of-memory killer's pick: a game running Linux out of memory must not cut the app off.
   keep = { Restart = "always"; RestartSec = 1; OOMScoreAdjust = -1000; };
   noTap = { ConditionKernelCommandLine = "!bsl.net=tap"; };
+  # A switch never stops or restarts the guest's own units; a changed one takes over at the next boot. Round 9 review:
+  # NixOS gives every unit systemd.globalEnvironment (LOCALE_ARCHIVE), so a language added or an Updates run that moved
+  # nixpkgs changed all of them, and switch-to-configuration stopped the relay, the network and the agent. Stopping the
+  # agent ends everything the app started in its unit, the switch itself included (bsl-nix now runs it in a unit of its
+  # own as well), so nothing was started again and the app lost the VM until a hard reset. Stopped on purpose,
+  # Restart=always does nothing.
+  notOnSwitch = { restartIfChanged = false; stopIfChanged = false; };
 in
 {
   options.breadstick.vm.enable = lib.mkEnableOption "the Breadstick VM guest (agent on vsock 5000, networking through the app, display relay)";
@@ -51,7 +58,7 @@ in
 
     # files/bsl-vmagent.service. Every program the app starts runs in this unit: OOMPolicy=continue keeps one
     # program killed for memory from ending the desktop with it (Lenovo, 2026-10-07).
-    systemd.services.bsl-vmagent = {
+    systemd.services.bsl-vmagent = notOnSwitch // {
       description = "Breadstick VM agent (vsock 5000, host only)";
       unitConfig.DefaultDependencies = false;
       after = [ "systemd-modules-load.service" "local-fs.target" ];
@@ -61,7 +68,7 @@ in
     };
 
     # files/bsl-vmnet-setup.service: the dummy route and the nftables redirect, with the tools on its PATH.
-    systemd.services.bsl-vmnet-setup = {
+    systemd.services.bsl-vmnet-setup = notOnSwitch // {
       description = "Breadstick VM network routes (dummy bsl0, nftables redirect)";
       unitConfig = noTap // { DefaultDependencies = false; };
       after = [ "systemd-modules-load.service" "systemd-tmpfiles-setup.service" ];
@@ -71,7 +78,7 @@ in
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; ExecStart = "${bin}/vmnet-setup"; };
     };
 
-    systemd.services.bsl-vmnet = {
+    systemd.services.bsl-vmnet = notOnSwitch // {
       description = "Breadstick VM networking through the app (vsock 5100)";
       unitConfig = noTap;
       after = [ "bsl-vmnet-setup.service" ];
@@ -80,7 +87,7 @@ in
       serviceConfig = keep // { ExecStart = "${bin}/bsl-vmnet 5100 15001 53"; };
     };
 
-    systemd.services.bsl-x11-relay = {
+    systemd.services.bsl-x11-relay = notOnSwitch // {
       description = "Breadstick VM display relay (vsock 6000 <-> /tmp/.X11-unix/X0)";
       after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
       wantedBy = [ "multi-user.target" ];

@@ -120,6 +120,48 @@ check("add and apply after gc", st == 0 and "applied: generation" in o, o.strip(
 o, st = run(f"{B} keyrings; cat /home/tester/.local/share/keyrings/default")
 check("the user's desktop keyring in the VM", o.strip().endswith("login"), o.strip()[-200:])
 
+# A switch that changes the guest's own units, through the agent as the app runs it (round 9 review: `bsl-nix
+# languages` changed every unit, since NixOS gives them all LOCALE_ARCHIVE, and switch-to-configuration stopped the
+# agent with the switch inside it; the VM was lost until a hard reset). The device state first, as the app now writes
+# it before the fill (X11DesktopSession: region, online, network_metered).
+UNITS = "bsl-vmagent bsl-vmnet bsl-x11-relay"
+o, st = run(f"systemctl show -p InvocationID --value {UNITS}; readlink -f /etc/systemd/system/bsl-vmagent.service")
+before = o.split()
+o, st = run("mkdir -p /run/bsl && printf 'LANG=de_DE.UTF-8\\nLANGUAGE=de_DE:en_US\\n' > /run/bsl/region && "
+            "echo 1 > /run/bsl/online && echo 0 > /run/bsl/network_metered && echo written")
+t1 = time.time()
+lang_out, lang_st = None, None
+try:
+    lang_out, lang_st = run(f"{B} languages > /tmp/languages.out 2>&1; rc=$?; grep -E '^\\[BSL\\]' /tmp/languages.out; exit $rc")
+except (OSError, EOFError) as e:
+    lang_out = f"the agent connection dropped: {e!r}"
+check("languages through the agent in the VM", lang_st == 0 and "de_DE.UTF-8 filled in" in (lang_out or ""),
+      f"{time.time() - t1:.0f} s: " + (lang_out or "").strip().replace("\n", " | ")[-300:])
+agent = None
+for _ in range(60):
+    try:
+        agent = bslvm.simple(args, "p")[0].decode()
+        break
+    except OSError:
+        time.sleep(1)
+check("the agent still answers after the switch", agent is not None and agent.startswith("PONG"), repr(agent))
+o, st = run(f"systemctl is-active {UNITS}; systemctl show -p InvocationID --value {UNITS}; "
+            "readlink -f /etc/systemd/system/bsl-vmagent.service; locale -a | grep -ix de_DE.utf8")
+after = o.split()
+check("the guest's units neither stopped nor restarted, though they changed",
+      after[:3] == ["active"] * 3 and after[3:6] == before[:3] and len(after) > 6 and len(before) > 3 and after[6] != before[3],
+      " ".join(before) + " -> " + " ".join(after))
+check("German is a locale", any(w.lower() == "de_de.utf8" for w in after[7:]), " ".join(after[7:]))
+o, st = run("getent hosts channels.nixos.org")
+check("dns through the host after the switch", st == 0 and o.strip() != "", o.strip())
+# And again: nothing more to do, and rolled back to before the fill it stays there (round 9 review).
+o, st = run(f"{B} languages 2>&1 | tail -2")
+check("languages the second time", st == 0 and "in" in o and "filling" not in o, o.strip().replace("\n", " | "))
+o, st = run(f"{B} rollback 2>&1 | tail -1; {B} languages; echo rc=$?")
+check("languages never undo a rollback", "one you rolled back to" in o and "rc=4" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run(f"systemctl is-active {UNITS}")
+check("the guest's units after the rollback's switch", o.split() == ["active"] * 3, o.strip().replace("\n", " "))
+
 bslvm.simple(args, "o", b"poweroff")
 try:
     q.wait(120)
