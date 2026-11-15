@@ -10,6 +10,7 @@
 #   KERNEL=0 vm/test/qemu-test.sh ...              # skip the disk's-own-kernel test (it installs a kernel: 4 boots)
 #   GROW=0 FILEBACKUP=0 vm/test/qemu-test.sh ...   # skip the disk growth (a boot) and the file backup round trip (a boot)
 #   PROOT_IMAGE=<proot image .tar.zst> vm/test/qemu-test.sh ...   # also restore a proot system into the VM, last
+#                                                                  # (its own files from file-backup.sh's round trip too)
 #   CID=78 vm/test/qemu-test.sh ...                # the guest's vsock CID (default 77): one per test running at once
 # arm64 runs under KVM on an arm64 host; amd64 under TCG (slow). Needs the bsl-vmtest:3 image
 # (Debian 13 + qemu-system-arm/x86 + python3; Dockerfile beside this script).
@@ -43,9 +44,10 @@ if [ -n "${AGENT_DIR:-}" ]; then
   AGENT_ENV="-e AGENT=2"
 fi
 # PROOT_IMAGE=<a proot system image or backup tar.zst of the same distribution> (plan 5.14 V20): restored into the VM
-# the way the app restores a proot system's backup there (file-unpack-proot.sh, then file-restore.sh), last.
+# the way the app restores a proot system's backup there (file-unpack-proot.sh, then file-restore-proot.sh), last. The
+# image is first made what a backup from the app holds (proot-backup-tar.py: every folder 0755, everything root's).
 if [ -n "${PROOT_IMAGE:-}" ]; then
-  zstd -q -dc "$PROOT_IMAGE" > "$work/proot.tar"
+  zstd -q -dc "$PROOT_IMAGE" | python3 -I "$here/proot-backup-tar.py" > "$work/proot.tar"
 fi
 # The app's VM helpers (Android app/src/main/assets/vm), for the bridges test; skipped without them.
 ASSETS=${ANDROID_ASSETS:-$here/../../../Android/app/src/main/assets/vm}

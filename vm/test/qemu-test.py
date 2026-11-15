@@ -132,6 +132,16 @@ check("write file", st == 0 and o.split() == ["640", "hello"], o)
 o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend")
 check("systemd", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
 
+# The image's own files, recorded at the disk's first boot before the account is made, as the app's boot does
+# (Android vm/VmFileBackup.IMAGE_FILES_SCRIPT, copied in image-files.sh): what a proot system's backup restored into the
+# VM keeps (plan 5.14 V20, round 9 review). A second run changes nothing.
+IMAGE_FILES = open("/t/image-files.sh").read()
+o, st = run(IMAGE_FILES)
+o2, st2 = run(IMAGE_FILES)
+o3, _ = run("gzip -dc /var/lib/breadstick-vm/image-files.gz | grep -cx -e /usr/bin/systemctl -e /etc/fstab")
+check("image files: recorded at the first boot, once", st == 0 and "recorded" in o and st2 == 0 and o2.strip() == "" and o3.strip() == "2",
+      f"{o.strip()} | {o2.strip()} | {o3.strip()}")
+
 # The app's user preparation: Android vm/VmCommands.prepareUserScript("tester"), copied in prepare-user.sh (the app's
 # VmCommandsTest checks the copy).
 PREPARE_USER = open("/t/prepare-user.sh").read()
@@ -734,6 +744,7 @@ def file_backup_test():
           f"{len(names)} entries; sudo {oct(sudo.mode) if sudo else None}, keep uid {keep.uid if keep else None} "
           f"xattr {keep.pax_headers.get('SCHILY.xattr.user.breadstick') if keep else None}")
     run("rm -f ~/r9-keep.txt ~/r9-link; echo after > ~/r9-after.txt", user="tester")
+    run("echo after > /etc/r9-after.conf; chmod 0700 /var/tmp")
     t0 = time.time()
     st, o = stream_in(open("/t/file-unpack-vm.sh").read(), "/w/vm-files.tar")
     check("file restore: unpacked into the stage", st == 0, f"exit {st} in {time.time() - t0:.0f} s {o.strip()[-200:]}")
@@ -746,6 +757,11 @@ def file_backup_test():
                 "sudo -n true && echo sudo-ok; test -e /var/lib/breadstick-vm/restore || echo no-stage", user="tester")
     check("file restore: the user's files back with owner, link and attribute; sudo; no stage left",
           "kept by the backup" in o and "tester" in o and "r9-keep.txt" in o and "yes" in o and "sudo-ok" in o and "no-stage" in o,
+          o.strip().replace("\n", " | "))
+    # Round 9 review: the restore replaces the system, as on proot: what came after the backup is gone, modes are back.
+    o, st = run("test -e /home/tester/r9-after.txt || echo no-after; test -e /etc/r9-after.conf || echo no-etc; "
+                "stat -c %a /var/tmp; test -e /var/lib/breadstick-vm/restore.work || echo no-work")
+    check("file restore: what came after the backup is gone, /var/tmp's mode is back", o.split() == ["no-after", "no-etc", "1777", "no-work"],
           o.strip().replace("\n", " | "))
     o, st = run("systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '; echo; systemctl is-system-running --wait; systemctl is-active bsl-vmnet bsl-x11-relay")
     check("file restore: systemd and the VM guest after the restore", ("running" in o or "degraded" in o) and o.split()[-2:] == ["active", "active"],
@@ -931,9 +947,11 @@ def proot_restore_test():
     if not os.path.exists("/w/proot.tar"):
         return
     q = boot(" (for the proot restore)")
+    # Made after the image's list and not in the backup: the restore takes it away (round 9 review).
+    run("echo after > /etc/r9-after-image.conf")
     st, o = stream_in(open("/t/file-unpack-proot.sh").read(), "/w/proot.tar")
     check("proot restore: unpacked into the stage, owners root's", st == 0, f"exit {st} {o.strip()[-200:]}")
-    o, st = run(open("/t/file-restore.sh").read())
+    o, st = run(open("/t/file-restore-proot.sh").read())
     check("proot restore: laid over the system", st == 0 and "restored" in o, o.strip()[-300:])
     power_off(q, " (proot restored)")
     q = boot(" (after the proot restore)")
@@ -942,7 +960,16 @@ def proot_restore_test():
     o, st = run("sudo -n true && echo sudo-ok; . /etc/os-release; echo \"$NAME|$ID\"; systemctl is-active bsl-vmagent bsl-vmnet; "
                 "test -e /var/lib/breadstick-vm/restore || echo no-stage; stat -c '%U %a' /usr/bin/sudo", user="tester")
     check("proot restore: sudo, the system's identity, the VM guest, no stage", "sudo-ok" in o and "active\nactive" in o
-          and "no-stage" in o and "root" in o, o.strip().replace("\n", " | "))
+          and "no-stage" in o and "root" in o and "unable to resolve" not in o, o.strip().replace("\n", " | "))
+    # Round 9 review: the image's real programs in place of proot's stand-ins, the image's folder modes and owners,
+    # the VM's hosts file, and nothing the backup does not have.
+    o, st = run("head -c 4 /usr/bin/systemctl | od -An -c | tr -d ' '; for f in /usr/local/bin/systemctl /usr/local/bin/setpriv "
+                "/usr/sbin/policy-rc.d /etc/r9-after-image.conf; do test -e $f && echo has:$f; done; stat -c %a /var/tmp /root; "
+                "grep -c breadstick-vm /etc/hosts")
+    # /root: the image's mode, Fedora's 0550 (bake-vm-distro.sh) or 0700.
+    check("proot restore: the image's programs, folder modes and hosts; what came after the image is gone",
+          o.split()[:1] == ["177ELF"] and "has:" not in o and o.split()[1:4] == ["1777", "550" if DISTRO == "fedora" else "700", "1"],
+          o.strip().replace("\n", " | "))
     o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '")
     check("proot restore: systemd after it", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
     power_off(q, " (proot restore done)")
