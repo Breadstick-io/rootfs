@@ -94,4 +94,7 @@ echo "fails: $fails"
 exit $fails
 BSL_NIXTEST_RUN_END
 zstd -dc "$IMG" | docker import --platform "linux/$ARCH" - "$T" >/dev/null
-docker run --name "$C" --platform "linux/$ARCH" --privileged -v "$W:/t:ro" "$T" /bin/sh /t/run.sh
+# An amd64 image runs under qemu-user here, which cannot install a seccomp filter from inside the program (EINVAL):
+# Nix's builder filter is off for it (a device's x86-64 kernel takes it).
+E=""; [ "$ARCH" = "$(uname -m | sed 's/aarch64/arm64/; s/x86_64/amd64/')" ] || E="filter-syscalls = false"
+docker run --name "$C" --platform "linux/$ARCH" --privileged -e NIX_CONFIG="$E" -v "$W:/t:ro" "$T" /bin/sh /t/run.sh
