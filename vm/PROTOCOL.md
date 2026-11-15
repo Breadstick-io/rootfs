@@ -114,6 +114,36 @@ without sshfs gets it from Debian at the first mount (`apt-get install sshfs`; `
 includes it). Measured: arm64 KVM with OpenSSH's sftp-server as the host, 600-830 MB/s writing and
 610-780 MB/s reading 64 MB; the app's server against Debian's sshfs over pipes, 87 / 143 MB/s.
 
+## Images per distribution (4.0, plan 5.14 V4)
+
+`bake-vm.sh` bakes Debian's image; `DISTRO=fedora|archlinux FROM=<proot image> bake-vm.sh` runs `bake-vm-distro.sh`,
+which turns the proot image bootstrap-fedora.sh or bootstrap-arch.sh made into a VM image: the kernel and its
+initramfs builder (Fedora: dracut with `hostonly=no` and kernel-install's `layout=other` with
+`/etc/kernel/install.d/95-breadstick-vm.install`, which keeps `/boot/vmlinuz-<release>` as a raw Image, unpacked from
+Fedora's arm64 EFI zboot file by `files/bsl-unzboot`; Arch: mkinitcpio with `files/archlinux/mkinitcpio.conf` and the
+default preset only, and the `keep-modules` pacman hooks, which keep the running kernel's modules through a `linux`
+update), the guest above through `guest/install.sh`, and the proot workarounds taken out (Fedora's sudo and /root
+modes back to its own, Arch's stubs, masked hooks and DisableSandbox). Fedora boots with `selinux=0` (no policy is
+installed). The manifest is `<distro>/manifest-vm-<arch>.json` beside Debian's `manifest-vm-<arch>.json`; image.json
+carries `"distro"`.
+
+## Terminal tabs (agent runs, plan 5.14 V9)
+
+A tab is the user's tmux on a socket of the tab's own (`/tmp/.breadstick-tmux-<uid>-<key>`, `new-session -A`), so it
+reattaches after the tab or the app closed, with a seed that hands the agent's `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` over to breadstick-terminal.sh: while a desktop session runs, the app writes
+`/run/bsl/session` in the VM (`f` op) and the tab takes the session's display, bus and sound at each prompt, and gets
+the agent's back after Stop. `test/tab-command.sh` is a copy of the app's command for tab "q1".
+
+## File-level backups (agent runs, plan 5.14 V20)
+
+`test/file-backup.sh` (Android `VmFileBackup.TAR_SCRIPT`) streams the root file system as a POSIX tar with numeric
+owners and extended attributes; the app writes it into the same format-2 archive a proot system's backup is. A restore
+streams the backup's files into `test/file-unpack-vm.sh` (a VM's backup: owners kept) or `test/file-unpack-proot.sh`
+(a proot system's: everything root's, each home folder given to its account), which unpack into
+`/var/lib/breadstick-vm/restore`; only a whole backup is then laid over the system by `test/file-restore.sh`, which
+leaves the image's VM guest in place, and the app restarts the VM.
+
 ## Testing without a device
 
 ```

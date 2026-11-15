@@ -7,6 +7,7 @@
 #   ARCH=amd64 vm/bake-vm.sh          # the Intel Googlebook (bakes under qemu-user 10 on arm64)
 #   ARCH=arm64 vm/bake-vm.sh          # phones, tablets, the ARM Googlebook
 #   DESKTOP=0 ARCH=arm64 vm/bake-vm.sh   # no XFCE (a quick test image)
+#   DISTRO=fedora|archlinux FROM=<proot image> vm/bake-vm.sh   # Breadstick-RPM, Breadstick-Pac: bake-vm-distro.sh
 #
 # Output, in $OUT_DIR (default rootfs/dist/vm), named by stamp so a published copy never changes:
 #   debian-trixie-<arch>-vm-<stamp>/{vmlinuz, initrd.img, root.img.zst, image.json}
@@ -14,6 +15,14 @@
 #                             AutoBuild/deploy/vm-image.sh, which rebuilds it from image.json)
 # The app writes root.img sparse, extends it, and systemd grows the file system at first boot.
 set -eu
+
+# Breadstick-RPM and Breadstick-Pac (4.0, plan 5.14 V4) bake from their proot images: bake-vm-distro.sh. Debian's
+# bake below is unchanged.
+case "${DISTRO:-debian}" in
+  debian) ;;
+  fedora|archlinux) exec bash "$(dirname "$0")/bake-vm-distro.sh" ;;
+  *) echo "DISTRO must be debian, fedora or archlinux (nix: the Nix based system's own build)" >&2; exit 2 ;;
+esac
 
 ARCH="${ARCH:-arm64}"
 SUITE="${SUITE:-trixie}"

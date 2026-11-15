@@ -1,0 +1,24 @@
+#!/bin/sh
+# Breadstick VM (plan 5.14 V4/V7): every kernel Fedora installs is put where the app's boot-pair probe looks, as
+# /boot/vmlinuz-<release> (on arm64 the raw Image unpacked from Fedora's EFI zboot file: crosvm cannot load a PE) beside
+# /boot/initramfs-<release>.img (dracut's, made by 50-dracut.install with this system's layout=other, else here).
+# The app copies the newest pair out after each package run and boots it next (VmKernelSlots). Fedora keeps the
+# modules of its last kernels (installonly_limit), so the previous pair still boots if a new one does not.
+#   kernel-install calls it: COMMAND KERNEL_VERSION ENTRY_DIR KERNEL_IMAGE [INITRD...]
+set -eu
+cmd=$1 ver=$2 image=${4:-}
+k=/boot/vmlinuz-$ver
+i=/boot/initramfs-$ver.img
+case "$cmd" in
+  add)
+    [ -n "$image" ] && [ -f "$image" ] || { echo "95-breadstick-vm: no kernel image for $ver" >&2; exit 1; }
+    /usr/lib/breadstick-vm/bsl-unzboot "$image" "$k"
+    if [ ! -s "$i" ]; then
+      dracut -q -f --kver "$ver" "$i"
+    fi
+    ;;
+  remove)
+    rm -f "$k" "$i"
+    ;;
+esac
+exit 0

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Breadstick VM (plan 5.14 V7): pacman's 'linux' package replaces /usr/lib/modules/<release> and protects no running
+# kernel, so after a kernel update the running kernel (and the pair the app falls back to) could load no module:
+# not fuse (/mnt/host), not nft (networking). Before the transaction the running kernel's modules are copied aside;
+# after it, when pacman took them away, they are put back, marked as Breadstick's (breadstick-kept, and no pkgbase,
+# so the app's boot-pair probe never takes them for the package's kernel). Copies kept for a kernel that no longer
+# runs are removed at the next update.
+#   keep-modules save|restore      (pacman hooks 10-breadstick-vm-keep-modules and 95-breadstick-vm-keep-modules)
+set -eu
+r=$(uname -r)
+m=/usr/lib/modules
+keep=/var/lib/breadstick-vm/kept-modules
+case "${1:-}" in
+  save)
+    rm -rf "$keep.new"
+    [ -d "$m/$r/kernel" ] || exit 0
+    mkdir -p "$keep.new"
+    cp -a "$m/$r" "$keep.new/$r"
+    rm -rf "$keep"
+    mv "$keep.new" "$keep"
+    ;;
+  restore)
+    if [ ! -d "$m/$r/kernel" ] && [ -d "$keep/$r/kernel" ]; then
+      mkdir -p "$m/$r"
+      cp -a "$keep/$r/." "$m/$r/"
+      rm -f "$m/$r/pkgbase"
+      echo "kept by Breadstick for the running kernel $r; removed at the update after it stops running" > "$m/$r/breadstick-kept"
+      depmod "$r" 2>/dev/null || true
+      echo "Breadstick VM: kept the running kernel's modules ($r)"
+    fi
+    for d in "$m"/*; do
+      [ -f "$d/breadstick-kept" ] || continue
+      [ "${d##*/}" = "$r" ] && continue
+      rm -rf "$d"
+    done
+    rm -rf "$keep"
+    ;;
+  *) echo "usage: keep-modules save|restore" >&2; exit 2 ;;
+esac

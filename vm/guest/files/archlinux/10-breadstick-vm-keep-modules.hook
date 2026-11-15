@@ -1,0 +1,11 @@
+# Breadstick VM (plan 5.14 V7): the running kernel keeps its modules through a kernel update (keep-modules).
+[Trigger]
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = linux
+
+[Action]
+Description = Breadstick VM: saving the running kernel's modules...
+When = PreTransaction
+Exec = /usr/lib/breadstick-vm/keep-modules save

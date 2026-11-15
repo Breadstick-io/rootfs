@@ -1,0 +1,36 @@
+#!/bin/sh
+# Writes the kernel crosvm can boot: an arm64 EFI zboot image ("MZ" then "zimg" at byte 4, which Fedora's aarch64
+# kernels are since CONFIG_EFI_ZBOOT) unpacked to the raw Image inside it, anything else copied as it is (an x86-64
+# bzImage, Debian's and Arch's kernels). crosvm loads a raw arm64 Image or a bzImage, not a PE file (plan 5.14 V4).
+#
+#   bsl-unzboot IN OUT        # OUT is written whole or not at all (a temporary file, then a rename)
+#
+# The zboot header (Linux drivers/firmware/efi/libstub/zboot-header.S): u32 payload offset at 8, u32 payload size at
+# 12, the compression's name at 24 (gzip, zstd, xz, lzma, lz4, lzo; this handles gzip, zstd and xz, what Fedora and
+# the distributions building zboot use). The unpacked Image must carry arm64's magic "ARMd" at 56.
+set -eu
+in=${1:?IN}
+out=${2:?OUT}
+tmp="$out.bsl-unzboot.$$"
+trap 'rm -f "$tmp"' EXIT
+magic=$(dd if="$in" bs=1 skip=4 count=4 2>/dev/null)
+if [ "$magic" != zimg ]; then
+  cp "$in" "$tmp"
+  mv -f "$tmp" "$out"
+  exit 0
+fi
+u32() { od -An -tu4 -j "$1" -N 4 "$in" | tr -d ' '; }
+off=$(u32 8)
+size=$(u32 12)
+comp=$(dd if="$in" bs=1 skip=24 count=32 2>/dev/null | tr -d '\000')
+case "$comp" in
+  gzip) un="gzip -dc" ;;
+  zstd) un="zstd -q -dc" ;;
+  xz) un="xz -dc" ;;
+  *) echo "bsl-unzboot: $in is a zboot image compressed with '$comp', which this cannot unpack" >&2; exit 2 ;;
+esac
+tail -c +"$((off + 1))" "$in" | head -c "$size" | $un > "$tmp"
+[ "$(dd if="$tmp" bs=1 skip=56 count=4 2>/dev/null)" = ARMd ] \
+  || { echo "bsl-unzboot: what $in holds is not an arm64 Image" >&2; exit 1; }
+chmod 0644 "$tmp"
+mv -f "$tmp" "$out"

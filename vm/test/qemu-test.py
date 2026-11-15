@@ -37,6 +37,29 @@ else:
     qemu = ["qemu-system-x86_64", "-M", "q35", "-cpu", "max", "-accel", "tcg"]
     console = "console=ttyS0"
 cmdline = f"{console} root=/dev/vda rw panic=-1 bsl.vm=1"
+# The image's distribution and the words of its kernel line this test does not set itself (Fedora's selinux=0), from
+# image.json (plan 5.14 V4). Debian's images before 4.0 have no "distro": Debian.
+import json  # noqa: E402
+IMAGE = json.load(open("/w/image.json")) if os.path.exists("/w/image.json") else {}
+DISTRO = IMAGE.get("distro") or "debian"
+OWN = ("console=", "root=", "rw", "panic=", "quiet", "8250.")
+cmdline += "".join(" " + w for w in (IMAGE.get("cmdline") or "").split() if not w.startswith(OWN))
+FAMILY_OS_ID = {"debian": ("debian", "breadstick"), "fedora": ("fedora",), "archlinux": ("arch",)}
+ADMIN = "sudo" if DISTRO == "debian" else "wheel"
+# The family's own package commands, as root in the VM. Breadstick's repositories are left out of the refresh off
+# Debian: rpm.breadstick.io and pacman.breadstick.io serve nothing until the 4.0 publish (the images' own files still
+# name them). pacman: a configuration without [breadstick], full upgrades only (never a partial one).
+NO_BSL_PACMAN = "sed '/^\\[breadstick/,/^$/d' /etc/pacman.conf > /tmp/pc; "
+PKG = {
+    "debian": {"refresh": "apt-get update 2>&1 | tail -3",
+               "install": "DEBIAN_FRONTEND=noninteractive apt-get install -y -q {p} >/dev/null 2>&1"},
+    "fedora": {"refresh": "dnf -y --disablerepo=breadstick makecache 2>&1 | tail -3; dnf -q -y --disablerepo=breadstick repoquery --available cowsay | grep -q cowsay && echo 'Reading package lists'",
+               "install": "dnf -y -q --disablerepo=breadstick --setopt=install_weak_deps=False install {p} >/dev/null 2>&1"},
+    "archlinux": {"refresh": NO_BSL_PACMAN + "pacman --config /tmp/pc -Sy 2>&1 | tail -3; pacman --config /tmp/pc -Si cowsay >/dev/null && echo 'Reading package lists'",
+                  "install": NO_BSL_PACMAN + "pacman --config /tmp/pc -Syu --noconfirm --needed {p} >/dev/null 2>&1"},
+}[DISTRO]
+COWSAY = "/usr/games/cowsay" if DISTRO == "debian" else "cowsay"
+print(f"image: {IMAGE.get('name', '(no image.json)')}, distro {DISTRO}, kernel line: {cmdline}", flush=True)
 
 
 def boot(label="", kernel="/w/vmlinuz", initrd="/w/initrd.img", wait=None, must=True):
@@ -92,9 +115,9 @@ q = boot()
 out, st = bslvm.simple(args, "i")
 check("info", st == 0 and b"systemd=1" in out, out.decode().replace("\n", " "))
 # Agent 2 (plan 5.14 V5: static, os-release in 'i'), when qemu-test.sh put today's programs in (AGENT_DIR).
-if os.environ.get("AGENT") == "2":
+if os.environ.get("AGENT") == "2" or IMAGE.get("agent") == 2:
     info = dict(l.split("=", 1) for l in out.decode().splitlines() if "=" in l)
-    check("agent 2: version and os-release", info.get("agent") == "2" and info.get("os_id") in ("debian", "breadstick"),
+    check("agent 2: version and os-release", info.get("agent") == "2" and info.get("os_id") in FAMILY_OS_ID[DISTRO],
           f"agent={info.get('agent')} os_id={info.get('os_id')} os_version_id={info.get('os_version_id')} os_id_like={info.get('os_id_like')}")
     o, st = run("for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do ldd /usr/lib/breadstick-vm/$p 2>&1 | grep -q 'not a dynamic' && echo $p static; done")
     check("agent 2: the three programs are static", o.split().count("static") == 3, o.strip().replace("\n", " | "))
@@ -116,11 +139,28 @@ o, st = run(PREPARE_USER)
 check("prepare user", st == 0 and "bus ok" in o, o.strip())
 o, st = run("id -un; echo $XDG_RUNTIME_DIR; echo $DBUS_SESSION_BUS_ADDRESS; sudo -n true && echo sudo-ok", user="tester")
 check("user session", st == 0 and "tester" in o and "/run/user/" in o and "sudo-ok" in o, o.strip().replace("\n", " | "))
-# Plan 5.14 V6: Debian's result unchanged (the groups, the shell, the image's own sudoers rule) and the user's PATH.
+# Plan 5.14 V6: Debian's result unchanged (the groups, the shell, the image's own sudoers rule) and the user's PATH;
+# on Fedora and Arch the wheel group and its rule (install.sh), with only the groups the system has.
 o, st = run("id -Gn tester; getent passwd tester | cut -d: -f7; loginctl show-user tester -p Linger; "
             "cat /etc/sudoers.d/breadstick-vm; ls /etc/sudoers.d")
-check("user: Debian's groups, shell, linger and sudoers rule", all(x in o.split() for x in ("sudo", "audio", "video", "plugdev", "users"))
-      and "/bin/bash" in o and "Linger=yes" in o and "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" in o and ".tmp" not in o, o.strip().replace("\n", " | "))
+groups = ("sudo", "audio", "video", "plugdev", "users") if DISTRO == "debian" else ("wheel", "audio", "video", "users")
+check(f"user: {DISTRO}'s groups, shell, linger and sudoers rule", all(x in o.split() for x in groups)
+      and "/bin/bash" in o and "Linger=yes" in o and f"%{ADMIN} ALL=(ALL:ALL) NOPASSWD: ALL" in o and ".tmp" not in o, o.strip().replace("\n", " | "))
+if DISTRO == "fedora":
+    # SELinux off (selinux=0, no policy: plan 5.14 V4), Fedora's own modes for sudo and /root, and nothing from the proot image.
+    o, st = run("test -e /sys/fs/selinux/enforce && echo selinuxfs; dmesg | grep -c 'avc:'; "
+                "rpm -V sudo filesystem | grep -E '^.M' || echo modes-ok; stat -c '%a' /usr/bin/sudo /root; "
+                "grep -c selinux=0 /proc/cmdline")
+    check("fedora: SELinux off, no AVC, rpm -V sudo filesystem clean (4111, 0550)",
+          "selinuxfs" not in o and o.split()[:1] == ["0"] and "modes-ok" in o and "4111" in o and "550" in o, o.strip().replace("\n", " | "))
+    o, st = run("uname -r; ls /boot; cat /etc/kernel/install.conf | grep -v '^#'")
+    check("fedora: the boot pair kernel-install keeps for the app (layout=other)", "layout=other" in o and "vmlinuz-" in o
+          and "initramfs-" in o and "loader" not in o, o.strip().replace("\n", " | "))
+if DISTRO == "archlinux":
+    o, st = run("pacman-conf DisableSandbox; ls /usr/local/bin; ls -la /etc/pacman.d/hooks; ls /boot")
+    check("arch: no proot workarounds (no DisableSandbox, no stubs, no masked hooks), the default initramfs only",
+          "DisableSandbox" not in o and "systemctl" not in o and "/dev/null" not in o and "initramfs-linux.img" in o
+          and "fallback" not in o and "keep-modules" in o, o.strip().replace("\n", " | "))
 o, st = run("command -v xterm; command -v sudo", user="tester")
 check("user: which xterm and sudo", st == 0 and "/usr/bin/xterm" in o and "/usr/bin/sudo" in o, o.strip().replace("\n", " | "))
 
@@ -150,10 +190,10 @@ o, st = run("getent hosts deb.debian.org")
 check("dns through the host", st == 0 and o.strip() != "", o.strip())
 o, st = run("curl -sS -o /dev/null -w '%{http_code}' https://deb.debian.org/debian/dists/trixie/Release")
 check("https through the host", o.strip() == "200", o.strip())
-o, st = run("apt-get update 2>&1 | tail -3", user="root")
-check("apt-get update", st == 0 and "Reading package lists" in o and "Err" not in o, o.strip().replace("\n", " | "))
-o, st = run("DEBIAN_FRONTEND=noninteractive apt-get install -y -q cowsay >/dev/null 2>&1 && /usr/games/cowsay moo | tail -1")
-check("apt-get install", st == 0, o.strip())
+o, st = run(PKG["refresh"], user="root")
+check(f"{DISTRO}: package index refresh", st == 0 and "Reading package lists" in o and "Err" not in o, o.strip().replace("\n", " | "))
+o, st = run(PKG["install"].format(p="cowsay") + f" && {COWSAY} moo | tail -1")
+check(f"{DISTRO}: package install", st == 0, o.strip())
 
 
 def share_open():
@@ -244,9 +284,9 @@ if os.path.isdir("/repo"):
 class Chan:
     """An agent 'r' run kept open: stdin sent as it comes, output gathered by a thread (bytes)."""
 
-    def __init__(self, cmd, user="root", env=()):
+    def __init__(self, cmd, user="root", env=(), pty=False):
         self.s = bslvm.connect(args, bslvm.AGENT_PORT)
-        bslvm.request(self.s, "r", bslvm.run_payload(cmd, user, env=env))
+        bslvm.request(self.s, "r", bslvm.run_payload(cmd, user, pty, env=env))
         self.buf = bytearray()
         self.status = None
         self.lock = threading.Lock()
@@ -378,6 +418,27 @@ def bridges_test():
     import base64
     note = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify")]
     check("bridges: a notification reaches the app", st == 0 and any("Hello from the VM" in n for n in note), (o.strip(), note).__repr__())
+    # Plan 5.14 V9: a Terminal tab reaches the session's bus. The app writes /run/bsl/session in the VM while the
+    # session runs (Android VmCommands.sessionEnvLines); breadstick-terminal.sh gives a tab its lines at the prompt.
+    marker = ("BSL_SESSION_USER=tester\nXDG_RUNTIME_DIR=/tmp/runtime-tester\nDBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/runtime-tester/bus\n"
+              "DISPLAY=:0\nPULSE_SERVER=unix:/tmp/runtime-tester/pulse/native\nLIBGL_ALWAYS_SOFTWARE=1\n").encode()
+    _, st = bslvm.simple(args, "f", b"/run/bsl/session\0" + b"644\0" + marker)
+    tab_note = ("python3 -c \"import dbus; b=dbus.SessionBus(); n=dbus.Interface(b.get_object('org.freedesktop.Notifications',"
+                "'/org/freedesktop/Notifications'),'org.freedesktop.Notifications'); print(n.Notify('tab',0,'','From a VM tab','bus',[],{},5000))\"")
+    # The tab as the app starts it (tab-command.sh), without tmux, so its output comes straight back: the seed that hands
+    # the agent's runtime dir and bus over to breadstick-terminal.sh, then a login shell.
+    seed = open("/t/tab-command.sh").read().split("if command -v tmux", 1)[0]
+    tab = Chan(seed + "exec bash -li", user="tester", env=["BREADSTICK_TERMINAL=1"], pty=True)
+    time.sleep(2)
+    tab.send(("echo BUS=$DBUS_SESSION_BUS_ADDRESS; " + tab_note + "; exit\n").encode())
+    out_tab = tab.lines(20, lambda l: False if "BUS=" not in l else False)
+    got = helper.lines(10, lambda l: l.startswith("A .bsl-notify"))
+    note = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify")]
+    check("tabs (V9): a Terminal tab is on the session's bus (/run/bsl/session)",
+          st == 0 and any("BUS=unix:path=/tmp/runtime-tester/bus" in l for l in out_tab) and any("From a VM tab" in n for n in note),
+          repr([l[-80:] for l in out_tab if "BUS=" in l][:2]) + " " + repr(note)[:200])
+    tab.close()
+    run("rm -f /run/bsl/session")
     o, st = run("(printf 'copied in the VM' | timeout 10 xclip -quiet -selection clipboard >/dev/null 2>&1 &); echo ok",
                 user="tester", env=["DISPLAY=:0"])
     got = helper.lines(8, lambda l: False)
@@ -442,7 +503,7 @@ def files_test():
         return
     install = ("command -v sshfs >/dev/null 2>&1 && exit 0; export DEBIAN_FRONTEND=noninteractive; "
                "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends sshfs 2>&1 | tail -n 3; "
-               "command -v sshfs >/dev/null 2>&1")
+               "command -v sshfs >/dev/null 2>&1") if DISTRO == "debian" else "command -v sshfs"
     o, st = run(install)
     check("files: sshfs present (or installed)", st == 0, o.strip()[-200:])
     os.makedirs("/w/share", exist_ok=True)
@@ -560,6 +621,141 @@ if os.path.exists("/usr/bin/Xvfb"):
 
 files_test()
 
+
+def stream_out(cmd, path):
+    """An agent run as root whose output goes to [path] as it comes (a system's tar is too big to hold). Returns
+    (exit status, bytes)."""
+    n, st = 0, None
+    with bslvm.connect(args, bslvm.AGENT_PORT) as s, open(path, "wb") as f:
+        bslvm.request(s, "r", bslvm.run_payload(cmd, "root"))
+        bslvm.send_frame(s, "e")
+        for t, d in bslvm.frames(s):
+            if t == "o":
+                f.write(d)
+                n += len(d)
+            elif t == "x":
+                st = struct.unpack("<i", d)[0]
+    return st, n
+
+
+def stream_in(cmd, path):
+    """An agent run as root with [path] as its stdin. Returns (exit status, output)."""
+    out, st = b"", None
+    with bslvm.connect(args, bslvm.AGENT_PORT) as s:
+        bslvm.request(s, "r", bslvm.run_payload(cmd, "root"))
+        done = threading.Event()
+
+        def feed():
+            with open(path, "rb") as f:
+                for b in iter(lambda: f.read(65536), b""):
+                    bslvm.send_frame(s, "d", b)
+            bslvm.send_frame(s, "e")
+            done.set()
+
+        threading.Thread(target=feed, daemon=True).start()
+        for t, d in bslvm.frames(s):
+            if t == "o":
+                out += d
+            elif t == "x":
+                st = struct.unpack("<i", d)[0]
+    return st, out.decode(errors="replace")
+
+
+def tabs_test():
+    """Plan 5.14 V9: a Terminal tab in the VM is the user's tmux on the tab's own socket (Android
+    VmCommands.tabCommand, copied in tab-command.sh): what runs in it survives the tab closing, and the next start of
+    the tab attaches to the same session instead of making another."""
+    cmd = open("/t/tab-command.sh").read().strip()
+    o, st = run("command -v tmux")
+    if st != 0:
+        print("SKIP tabs (no tmux in this image)")
+        return
+    sock = "/tmp/.breadstick-tmux-1000-q1"
+    t1 = Chan(cmd, user="tester", env=["BREADSTICK_TERMINAL=1", "TERM=xterm-256color"], pty=True)
+    time.sleep(3)
+    t1.send(b"echo r9-pane-$$ > /tmp/r9-pane; sleep 600\r")
+    time.sleep(2)
+    t1.close()
+    time.sleep(3)
+    o, st = run(f"cat /tmp/r9-pane; tmux -S {sock} list-sessions -F '#{{session_name}} #{{session_attached}}'; "
+                f"tmux -S {sock} list-panes -F '#{{pane_current_command}}'", user="tester")
+    check("tabs (V9): the tab's shell keeps running after the tab closed (tmux)", "r9-pane-" in o and "main 0" in o and "sleep" in o,
+          o.strip().replace("\n", " | "))
+    t2 = Chan(cmd, user="tester", env=["BREADSTICK_TERMINAL=1", "TERM=xterm-256color"], pty=True)
+    time.sleep(3)
+    o, st = run(f"tmux -S {sock} list-sessions -F '#{{session_name}} #{{session_attached}}' | sort | tr '\\n' ' '; "
+                f"tmux -S {sock} list-panes -a -F '#{{pane_current_command}}' | tr '\\n' ' '", user="tester")
+    check("tabs (V9): the next start of the tab reattaches to the same session", o.split()[:2] == ["main", "1"] and o.count("main") == 1
+          and "sleep" in o, o.strip())
+    t2.close()
+    run(f"tmux -S {sock} kill-server; rm -f /tmp/r9-pane", user="tester")
+
+
+def file_backup_test():
+    """Plan 5.14 V20: a file-level backup of the running VM (Android vm/VmFileBackup.TAR_SCRIPT, copied in
+    file-backup.sh), checked as a tar (owners, setuid, links, an extended attribute), then restored into the same VM
+    the way the app restores one (file-unpack-vm.sh into the stage, file-restore.sh over the system) and booted: the
+    user's files come back with their owner and attribute, and sudo, the agent and networking still work. The app's
+    own conversion to and from the backup format (metadata, end entry, compression) is VmFileBackupTest's, against GNU
+    tar's output."""
+    global q
+    if os.environ.get("FILEBACKUP", "1") != "1":
+        print("SKIP file backup (FILEBACKUP=0)")
+        return
+    o, st = run("printf 'kept by the backup\\n' > ~/r9-keep.txt && ln -sf r9-keep.txt ~/r9-link && "
+                "python3 -c \"import os; os.setxattr(os.path.expanduser('~/r9-keep.txt'), 'user.breadstick', b'yes')\" && echo made",
+                user="tester")
+    check("file backup: the user's files to keep", "made" in o, o.strip())
+    t0 = time.time()
+    st, n = stream_out(open("/t/file-backup.sh").read(), "/w/vm-files.tar")
+    check("file backup: the system streams out as one tar", st in (0, 1) and n > (50 << 20),
+          f"tar exit {st}, {n >> 20} MiB in {time.time() - t0:.0f} s")
+    import tarfile
+    names, info = set(), {}
+    try:
+        with tarfile.open("/w/vm-files.tar", "r|") as tf:
+            for m in tf:
+                nm = m.name[2:] if m.name.startswith("./") else m.name
+                names.add(nm)
+                if nm in ("usr/bin/sudo", "home/tester/r9-keep.txt", "home/tester/r9-link", "home/tester", "proc", "tmp", "etc/shadow"):
+                    info[nm] = m
+        ok_tar = True
+    except Exception as e:  # noqa: BLE001
+        ok_tar = False
+        print("tar error:", e)
+    sudo = info.get("usr/bin/sudo")
+    keep = info.get("home/tester/r9-keep.txt")
+    link = info.get("home/tester/r9-link")
+    check("file backup: a whole POSIX tar with owners, setuid, a link and the user's attribute",
+          ok_tar and sudo is not None and sudo.mode & 0o4000 and keep is not None and keep.uid == 1000
+          and keep.pax_headers.get("SCHILY.xattr.user.breadstick") == "yes" and link is not None and link.issym()
+          and "etc/shadow" in info and "proc" in info and not any(x.startswith("proc/") for x in names)
+          and not any(x.startswith("tmp/") for x in names),
+          f"{len(names)} entries; sudo {oct(sudo.mode) if sudo else None}, keep uid {keep.uid if keep else None} "
+          f"xattr {keep.pax_headers.get('SCHILY.xattr.user.breadstick') if keep else None}")
+    run("rm -f ~/r9-keep.txt ~/r9-link; echo after > ~/r9-after.txt", user="tester")
+    t0 = time.time()
+    st, o = stream_in(open("/t/file-unpack-vm.sh").read(), "/w/vm-files.tar")
+    check("file restore: unpacked into the stage", st == 0, f"exit {st} in {time.time() - t0:.0f} s {o.strip()[-200:]}")
+    o, st = run(open("/t/file-restore.sh").read())
+    check("file restore: laid over the system", st == 0 and "restored" in o, o.strip()[-300:])
+    power_off(q, " (restored)")
+    q = boot(" (after the restore)")
+    o, st = run("cat ~/r9-keep.txt; stat -c %U ~/r9-keep.txt; readlink ~/r9-link; "
+                "python3 -c \"import os; print(os.getxattr(os.path.expanduser('~/r9-keep.txt'), 'user.breadstick').decode())\"; "
+                "sudo -n true && echo sudo-ok; test -e /var/lib/breadstick-vm/restore || echo no-stage", user="tester")
+    check("file restore: the user's files back with owner, link and attribute; sudo; no stage left",
+          "kept by the backup" in o and "tester" in o and "r9-keep.txt" in o and "yes" in o and "sudo-ok" in o and "no-stage" in o,
+          o.strip().replace("\n", " | "))
+    o, st = run("systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '; echo; systemctl is-system-running --wait; systemctl is-active bsl-vmnet bsl-x11-relay")
+    check("file restore: systemd and the VM guest after the restore", ("running" in o or "degraded" in o) and o.split()[-2:] == ["active", "active"],
+          o.strip().replace("\n", " | "))
+    os.remove("/w/vm-files.tar")
+
+
+tabs_test()
+file_backup_test()
+
 BOOT_PAIR = open("/t/boot-pair.sh").read()
 
 
@@ -599,12 +795,45 @@ def kernel_prepare():
     if p is None:
         return
     KERNEL["old"] = p[0]
-    o, st = run("export DEBIAN_FRONTEND=noninteractive; a=$(dpkg --print-architecture); "
-                "c=$(apt-cache policy linux-image-$a | sed -n 's/ *Candidate: //p'); i=$(dpkg-query -W -f='${Version}' linux-image-$a); "
-                "if [ \"$c\" != \"$i\" ]; then pk=linux-image-$a; else pk=linux-image-rt-$a; fi; "
-                "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends $pk >/tmp/kernel.log 2>&1 && echo \"installed $pk\"; "
-                "tail -n 3 /tmp/kernel.log")
+    if DISTRO == "debian":
+        o, st = run("export DEBIAN_FRONTEND=noninteractive; a=$(dpkg --print-architecture); "
+                    "c=$(apt-cache policy linux-image-$a | sed -n 's/ *Candidate: //p'); i=$(dpkg-query -W -f='${Version}' linux-image-$a); "
+                    "if [ \"$c\" != \"$i\" ]; then pk=linux-image-$a; else pk=linux-image-rt-$a; fi; "
+                    "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends $pk >/tmp/kernel.log 2>&1 && echo \"installed $pk\"; "
+                    "tail -n 3 /tmp/kernel.log")
+    elif DISTRO == "fedora":
+        # Another kernel the way Fedora installs one (kernel-core is install-only: kernel-install, then the image's
+        # 95-breadstick-vm.install plugin). The newest in updates-testing when it is newer, else the release's own.
+        o, st = run("D='dnf -y -q --disablerepo=breadstick --setopt=install_weak_deps=False'; "
+                    "i=$(rpm -q --qf '%{VERSION}-%{RELEASE}\\n' kernel-core | sort -V | tail -n 1); "
+                    "c=$($D --enablerepo=updates-testing repoquery --latest-limit 1 --qf '%{version}-%{release}\\n' kernel-core 2>/dev/null | sort -V | tail -n 1); "
+                    "if [ -n \"$c\" ] && [ \"$(printf '%s\\n%s\\n' \"$i\" \"$c\" | sort -V | tail -n 1)\" = \"$c\" ] && [ \"$c\" != \"$i\" ]; then "
+                    "$D --enablerepo=updates-testing install \"kernel-core-$c\" >/tmp/kernel.log 2>&1 && echo \"installed kernel-core-$c\"; "
+                    "else echo \"no newer kernel than $i (updates-testing: ${c:-none})\"; exit 77; fi; tail -n 3 /tmp/kernel.log")
+        if st == 77:
+            print(f"SKIP kernel ({o.strip()})")
+            return
+    else:
+        # Arch: the kernel before this one from Arch's own archive, through pacman -U: an Upgrade transaction of
+        # 'linux', so pacman removes the running kernel's modules and the keep-modules hooks must put them back. A
+        # module the running kernel has not loaded yet must still load after it (plan 5.14 V7).
+        o, st = run("for x in loop sctp ip_gre btrfs; do grep -q \"^$x \" /proc/modules && continue; "
+                    "modinfo -n $x 2>/dev/null | grep -q '\\.ko' && { echo $x; break; }; done")
+        KERNEL["probe_module"] = o.strip()
+        o, st = run(NO_BSL_PACMAN + "cur=$(pacman -Q linux | cut -d' ' -f2); "
+                    "v=$(curl -fsS https://archive.archlinux.org/packages/l/linux/ | grep -o 'linux-[0-9][^\"]*-x86_64\\.pkg\\.tar\\.zst\"' "
+                    "| tr -d '\"' | sed 's/^linux-//; s/-x86_64.pkg.tar.zst$//' | sort -uV | awk -v c=\"$cur\" '$0 != c' "
+                    "| while read x; do [ \"$(printf '%s\\n%s\\n' \"$x\" \"$cur\" | sort -V | head -n 1)\" = \"$x\" ] && echo $x; done | tail -n 1); "
+                    "[ -n \"$v\" ] || { echo no older linux; exit 1; }; "
+                    "pacman --config /tmp/pc -U --noconfirm https://archive.archlinux.org/packages/l/linux/linux-$v-x86_64.pkg.tar.zst >/tmp/kernel.log 2>&1 "
+                    "&& echo \"installed linux $v (was $cur)\"; tail -n 4 /tmp/kernel.log")
     check("kernel: a new kernel installs", st == 0 and "installed" in o, o.strip().replace("\n", " | ")[-300:])
+    if DISTRO == "archlinux":
+        m = KERNEL.get("probe_module")
+        o, st = run(f"r=$(uname -r); ls /usr/lib/modules; cat /usr/lib/modules/$r/breadstick-kept 2>/dev/null | head -c 40; echo; "
+                    f"test ! -e /usr/lib/modules/$r/pkgbase && echo no-pkgbase; {'modprobe ' + m + ' && echo loaded' if m else 'echo loaded'}")
+        check("kernel: the running kernel kept its modules through the update (keep-modules)",
+              "kept by Breadstick" in o and "no-pkgbase" in o and "loaded" in o, o.strip().replace("\n", " | "))
     q2 = boot_pair()
     check("kernel: the disk now boots another pair", q2 is not None and q2[0] != p[0], f"{q2 and q2[0]} ({q2 and q2[2]})")
     if q2 is None or q2[0] == p[0]:
@@ -683,7 +912,10 @@ if os.environ.get("GROW", "1") == "1":
           f"stored {stored_before} -> {stored_mib('/w/root.img')} MiB, length {before >> 20} -> {os.path.getsize('/w/root.img') >> 20} MiB")
     if "new" in KERNEL:
         o, _ = run("uname -r")
-        check("kernel: the image's own pair still boots the upgraded disk (Debian keeps the old modules)", o.strip() == KERNEL["old"], o.strip())
+        check("kernel: the image's own pair still boots the upgraded disk (Debian and Fedora keep the old modules, Arch's keep-modules)", o.strip() == KERNEL["old"], o.strip())
+        if DISTRO != "debian":
+            o, _ = run("lsmod | grep -c -e '^nft_redir' -e '^dummy'; systemctl is-active bsl-vmnet")
+            check("kernel: the image's own pair has its modules and networking", o.split() == ["2", "active"], o.strip().replace("\n", " | "))
     power_off(q, " (grown disk)")
 
 kernel_boots()

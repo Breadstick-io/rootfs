@@ -1,0 +1,5 @@
+# mkinitcpio preset for the 'linux' package. Breadstick VM: the default image only (no fallback image: it would double
+# the pair the app copies out, and the VM's own MODULES already make the default one boot anywhere).
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default')
+default_image="/boot/initramfs-linux.img"
