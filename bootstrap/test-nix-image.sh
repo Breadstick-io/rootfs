@@ -41,10 +41,31 @@ t $P/bsl-nix boot > /tmp/boot.log 2>&1; check "bsl-nix boot" $? "$(tail -1 /tmp/
 check "the paths Breadstick systems have" $?
 grep -q '^ID=nixos' /etc/os-release; check "os-release says nixos" $?
 [ "$(cat /etc/breadstick/version)" = "$(cat /etc/breadstick/nix/src/VERSION)" ]; check "Breadstick's version in /etc" $? "$(cat /etc/breadstick/version)"
-# The shell programs' Python finds GTK 3 (GI_TYPELIB_PATH from the system's environment, as a login shell gets it), and
-# the session script parses.
-o=$(bash -lc "python3 -c \"import gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk, Pango, GdkPixbuf; import dbus, cairo; print('gi ok')\"" 2>&1)
+# The shell programs' Python finds GTK 3 in a login shell and in an `env -i` as Android launches apps (its own
+# environment: round 9 review), and the session script parses.
+GI="import gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk, Pango, GdkPixbuf; import dbus, cairo; print('gi ok')"
+o=$(bash -lc "python3 -c \"$GI\"" 2>&1)
 [ "$o" = "gi ok" ]; check "Python with GTK 3, D-Bus and cairo" $? "$(echo "$o" | tail -1)"
+o=$(env -i HOME=/root PATH=$PATH python3 -c "$GI" 2>&1)
+[ "$o" = "gi ok" ]; check "the same from env -i (the Apps drawer, Floating mode)" $? "$(echo "$o" | tail -1)"
+# A login shell keeps /usr/local's folders, after the setuid wrappers (round 9 review: bsl-audio was not found).
+mkdir -p /usr/local/bin; printf '#!/bin/sh\necho shim\n' > /usr/local/bin/bsl-test-shim; chmod 755 /usr/local/bin/bsl-test-shim
+o=$(env -i HOME=/root PATH=$PATH bash -lc 'echo "$PATH"; bsl-test-shim' 2>&1)
+case "$(echo "$o" | head -1)" in /run/wrappers/bin:/usr/local/sbin:/usr/local/bin:*) r=0 ;; *) r=1 ;; esac
+[ "$(echo "$o" | tail -1)" = shim ] || r=1
+check "a login shell's PATH has /usr/local after the wrappers" $r "$(echo "$o" | head -1 | cut -c1-90)"
+rm -f /usr/local/bin/bsl-test-shim
+# The desktop's parts the review found missing: the marker, the look's themes at /usr/share, xsetroot and xrdb,
+# dconf's and the keyring's D-Bus services, the keyring's wrapper.
+[ -f /etc/breadstick/desktop-ok ]; check "the desktop marker" $?
+m=""; for d in themes/Breadstick/gtk-3.0 backgrounds/breadstick icons applications X11/xkb locale/de/LC_MESSAGES; do [ -d /usr/share/$d ] || m="$m $d"; done
+[ -z "$m" ]; check "the profile's themes, wallpapers, icons, menu entries, keyboard data and translations at /usr/share" $? "${m:+missing:$m}"
+command -v xsetroot >/dev/null && command -v xrdb >/dev/null; check "xsetroot and xrdb" $?
+SD=$(grep -o '<servicedir>[^<]*' /etc/dbus-1/session.conf 2>/dev/null | sed 's|<servicedir>||')
+ls $SD 2>/dev/null | grep -q '^ca.desrt.dconf.service$'; check "dconf's D-Bus service on the session bus" $? "$(echo $SD | wc -w) service folder(s)"
+ls $SD 2>/dev/null | grep -q '^org.freedesktop.secrets.service$'; check "the keyring's D-Bus service on the session bus" $?
+[ -x /run/wrappers/bin/gnome-keyring-daemon ]; check "the keyring's wrapper" $?
+[ "$(readlink /nix/var/nix/gcroots/breadstick-nixpkgs)" = "$(readlink -f /etc/breadstick/nix/nixpkgs)" ]; check "nixpkgs is a gc root" $?
 sh -n /usr/lib/breadstick/start-desktop-x11.sh; check "the session script parses" $?
 for p in xfce4-session xfwm4 xfce4-panel xfdesktop xfsettingsd xfce4-terminal thunar openbox xdotool wmctrl pulseaudio dbus-daemon tmux; do
   command -v $p >/dev/null || { echo "  missing $p"; miss=1; }
@@ -55,22 +76,46 @@ check "the desktop's programs" ${miss:-0}
 printf 'secret1\n' | sh /t/setup-user.sh tester > /tmp/user.log 2>&1; r=$?
 check "setup-user.sh" $r "$(tail -1 /tmp/user.log)"
 $P/bsl-nix account tester > /tmp/acct.log 2>&1; check "bsl-nix account" $? "$(tail -1 /tmp/acct.log)"
+[ "$(cat /home/tester/.local/share/keyrings/default 2>/dev/null)" = login ]; check "the user's desktop keyring" $?
+
 o=$(su tester -s /bin/sh -c 'PATH=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin; sudo -n id -u' 2>&1); [ "$o" = 0 ]; check "sudo -n as the user" $? "$o"
 
 s=$($P/bsl-nix status --json); echo "$s" | grep -q '"generation": 1'; check "status: generation 1" $? "$s"
+# The user's language at the first start (round 9 review): German from Android, filled in by bsl-nix languages.
+mkdir -p /run/bsl
+printf 'VERSION=1\nLANGUAGE=de_DE:de\nLANG=de_DE.UTF-8\n' > /run/bsl/region
+printf '1\n' > /run/bsl/online; printf '1\n' > /run/bsl/network_metered
+$P/bsl-nix languages > /tmp/lang0.log 2>&1; check "languages wait for Wi-Fi" $(( $? != 75 )) "$(tail -1 /tmp/lang0.log)"
+printf '0\n' > /run/bsl/network_metered
+t $P/bsl-nix languages > /tmp/lang.log 2>&1; r=$?; check "languages: German filled in" $r "$(grep 'languages:' /tmp/lang.log | tail -1)"
+[ $r = 0 ] || tail -20 /tmp/lang.log
+o=$(LOCALE_ARCHIVE=/run/current-system/sw/lib/locale/locale-archive locale -a 2>/dev/null | tr '\n' ' ')
+case " $o" in *" de_DE.utf8 "*) r=0 ;; *) r=1 ;; esac; check "de_DE.UTF-8 is a locale now" $r "$o"
+$P/bsl-nix languages > /tmp/lang2.log 2>&1; check "languages again: nothing to do" $? "$(tail -2 /tmp/lang2.log | head -1)"
+G0=$(readlink /nix/var/nix/profiles/system)
 $P/bsl-nix add 'hello; reboot' > /tmp/bad.log 2>&1; check "a bad name is refused" $(( $? != 2 )) "$(tail -1 /tmp/bad.log)"
 $P/bsl-nix add no-such-package-xyz > /tmp/bad2.log 2>&1; check "a missing package is refused" $(( $? == 0 )) "$(tail -1 /tmp/bad2.log)"
+$P/bsl-nix add vscode > /tmp/bad3.log 2>&1; r=$?; grep -q "not free software" /tmp/bad3.log || r=0
+check "an unfree package is refused" $(( r == 0 )) "$(grep 'vscode' /tmp/bad3.log | tail -1)"
+[ -z "$($P/bsl-nix packages)" ]; check "the list is still empty" $?
 $P/bsl-nix add hello > /tmp/add.log 2>&1; check "add hello" $? "$(tail -1 /tmp/add.log)"
 [ "$($P/bsl-nix packages)" = hello ]; check "the page's list" $?
 t $P/bsl-nix apply > /tmp/apply.log 2>&1; r=$?; check "apply" $r "$(tail -2 /tmp/apply.log | head -1)"
 [ $r = 0 ] || tail -30 /tmp/apply.log
 command -v hello >/dev/null && [ "$(hello)" = "Hello, world!" ]; check "hello runs from the PATH" $?
-[ "$(readlink /nix/var/nix/profiles/system)" = system-2-link ]; check "generation 2" $?
-o=$($P/bsl-nix generations); [ "$(echo "$o" | wc -l)" = 2 ]; check "two generations" $? "$(echo "$o" | tr '\n' ' ')"
+$P/bsl-nix query hello | grep -q "STATUS: install ok installed"; check "query: hello installed" $?
+G1=$(readlink /nix/var/nix/profiles/system)
+[ "$G1" != "$G0" ]; check "a new generation" $? "$G0 -> $G1"
+o=$($P/bsl-nix generations); [ "$(echo "$o" | wc -l)" = 3 ]; check "three generations" $? "$(echo "$o" | tr '\n' ' ')"
 t $P/bsl-nix rollback > /tmp/rb.log 2>&1; check "rollback" $? "$(tail -2 /tmp/rb.log | head -1)"
-[ "$(readlink /nix/var/nix/profiles/system)" = system-1-link ] && ! command -v hello >/dev/null; check "back on 1, hello gone" $?
-$P/bsl-nix rollback > /tmp/rb2.log 2>&1; check "no generation before 1" $(( $? == 0 )) "$(tail -1 /tmp/rb2.log)"
-t $P/bsl-nix rollback 2 > /tmp/rb3.log 2>&1; check "forward to 2" $? "$(tail -2 /tmp/rb3.log | head -1)"
+[ "$(readlink /nix/var/nix/profiles/system)" = "$G0" ] && ! command -v hello >/dev/null; check "back on the one before, hello gone" $?
+o=$($P/bsl-nix query hello); echo "$o" | grep -q STATUS; check "query: hello not installed after the rollback" $(( $? == 0 ))
+t $P/bsl-nix rollback 1 > /tmp/rb2.log 2>&1; check "back to generation 1" $? "$(tail -2 /tmp/rb2.log | head -1)"
+$P/bsl-nix rollback > /tmp/rb2b.log 2>&1; check "no generation before 1" $(( $? == 0 )) "$(tail -1 /tmp/rb2b.log)"
+t $P/bsl-nix rollback "$(echo "$G1" | sed 's/system-//; s/-link//')" > /tmp/rb3.log 2>&1; check "forward again" $? "$(tail -2 /tmp/rb3.log | head -1)"
+# install: add and apply as one; what does not build leaves the list as it was.
+$P/bsl-nix install vscode > /tmp/inst.log 2>&1; r=$?
+[ $r != 0 ] && [ "$($P/bsl-nix packages)" = hello ]; check "install of what cannot build changes nothing" $? "$(tail -1 /tmp/inst.log)"
 
 # switch-to-configuration against breadstick-systemd (Phase 0's stand-in, now the real supervisor).
 mkdir -p /run/dbus
@@ -90,6 +135,9 @@ t $P/bsl-nix apply > /tmp/sw.log 2>&1; r=$?; check "apply through switch-to-conf
 grep -q "switching to" /tmp/sw.log; check "it switched (not activated)" $?
 
 t $P/bsl-nix gc 1 > /tmp/gc.log 2>&1; check "gc" $? "$(grep -E 'freed|deleted' /tmp/gc.log | tail -1)"
+# After a clean up the page still works (round 9 review: a gc without nixpkgs' root left nothing to evaluate).
+[ -d "$(readlink -f /etc/breadstick/nix/nixpkgs)" ]; check "nixpkgs survives gc" $?
+$P/bsl-nix add hello > /tmp/add2.log 2>&1 && t $P/bsl-nix apply > /tmp/apply2.log 2>&1; check "add and apply after gc" $? "$(tail -2 /tmp/apply2.log | head -1)"
 echo "fails: $fails"
 exit $fails
 BSL_NIXTEST_RUN_END

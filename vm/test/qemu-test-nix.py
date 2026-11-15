@@ -108,8 +108,17 @@ o, st = run("hello", user="tester")
 check("hello as the user after the apply", o.strip() == "Hello, world!", o.strip()[-200:])
 o, st = run(f"{B} rollback 2>&1 | tail -2; command -v hello || echo gone")
 check("roll back in the VM", st == 0 and "rolled back to generation 1" in o and "gone" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run("readlink /nix/var/nix/gcroots/breadstick-nixpkgs; readlink -f /etc/breadstick/nix/nixpkgs; "
+            "for r in /nix/var/nix/gcroots/auto/*; do [ -L \"$r\" ] && [ ! -e \"$r\" ] && echo dangling; done; true")
+lines = o.split()
+check("nixpkgs is a gc root, no dangling roots (round 9 review)", len(lines) >= 2 and lines[0] == lines[1] and "dangling" not in o, o.strip())
 o, st = run(f"{B} gc 2>&1 | tail -2")
 check("gc in the VM", st == 0 and "freed" in o, o.strip().replace("\n", " | ")[-200:])
+# After a clean up the page still works: nixpkgs stays (round 9 review: gc took it, and every add and apply failed).
+o, st = run(f"{B} add hello && {B} apply 2>&1 | tail -2")
+check("add and apply after gc", st == 0 and "applied: generation" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run(f"{B} keyrings; cat /home/tester/.local/share/keyrings/default")
+check("the user's desktop keyring in the VM", o.strip().endswith("login"), o.strip()[-200:])
 
 bslvm.simple(args, "o", b"poweroff")
 try:

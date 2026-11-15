@@ -1,8 +1,9 @@
 # Breadstick-Nix: what /etc/nixos/configuration.nix imports (4.0, plan 5.9). Breadstick's file, written by the
 # image's bake and by Breadstick's updates; never edited by hand (put your own settings in configuration.nix).
 #
-#   local.json      this system's own settings (the engine, the Linux account, the NixOS release it started on),
-#                   written by the bake and `bsl-nix account` / `bsl-nix engine`
+#   local.json      this system's own settings (the engine, the Linux account, the NixOS release it started on, the
+#                   user's languages), written by the bake, `bsl-nix account` and `bsl-nix languages`. The engine is the
+#                   bake's: a system does not move between engines yet (a backup restores only on its own engine)
 #   breadstick.nix  the packages the Nix packages page manages (packages.json), in Settings and Linux Settings
 #   module/         Breadstick's NixOS module and package overlay (packages' breadstick-nix/nix)
 #   src/            Breadstick's package sources the overlay builds (no binary cache serves them yet)

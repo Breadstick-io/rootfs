@@ -13,18 +13,23 @@ good() {
     echo "-rw-r--r-- 0/0 12 2026-11-15 09:00 $f"
   done
   echo "-rw-r--r-- 0/0 0 2026-11-15 09:00 ./etc/machine-id"
+  echo "-rw-r--r-- 0/0 0 2026-11-15 09:00 ./etc/breadstick/desktop-ok"
+  echo "lrwxrwxrwx 0/0 0 2026-11-15 09:00 ./usr/share/themes -> /nix/var/nix/profiles/system/sw/share/themes"
   echo "drwxr-xr-x 0/0 0 2026-11-15 09:00 ./run/"
   for l in ./nix/var/nix/profiles/system ./bin/sh ./bin/bash ./etc/os-release ./etc/breadstick/nix/nixpkgs \
            ./nix/var/nix/gcroots/breadstick-nixpkgs; do
     echo "lrwxrwxrwx 0/0 0 2026-11-15 09:00 $l -> /nix/store/x"
   done
 }
-expect() {  # $1 = pass|fail, $2 = name, stdin = the listing
+expect() {  # $1 = pass|fail, $2 = name, $3 = base|desktop (default desktop), stdin = the listing
   cat > "$W/l"
-  if bsl_nix_listing_check "$W/l" > "$W/o"; then r=pass; else r=fail; fi
+  if bsl_nix_listing_check "$W/l" "${3:-desktop}" > "$W/o"; then r=pass; else r=fail; fi
   if [ "$r" = "$1" ]; then echo "ok $2"; else echo "FAIL $2 ($(cat "$W/o"))"; fails=$((fails + 1)); fi
 }
 good | expect pass "a good image"
+good | grep -v 'desktop-ok' | expect fail "a desktop image without the desktop marker"
+good | grep -v 'desktop-ok' | grep -v 'share/themes' | expect pass "a base image needs neither" base
+good | grep -v 'share/themes' | expect fail "a desktop image without /usr/share/themes"
 good | grep -v ' ./etc/NIXOS$' | expect fail "no /etc/NIXOS"
 good | grep -v 'profiles/system ->' | expect fail "no system profile"
 good | sed 's|0 2026-11-15 09:00 ./etc/machine-id|33 2026-11-15 09:00 ./etc/machine-id|' | expect fail "a machine id in the image"

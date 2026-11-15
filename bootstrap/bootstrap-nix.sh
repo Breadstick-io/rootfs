@@ -36,14 +36,16 @@
 #      own at its first boot), /run emptied.
 #   5. The image: the root tree as tar (numeric owner 0), zstd level 19, nixos-<release>-<arch>[-desktop]-<stamp>.tar.zst
 #      in dist/ (git-ignored), written .unchecked and renamed only when its checks pass (nix-image-checks.sh: under
-#      Cloudflare's 512,000,000-byte cache limit, no hard link, the store verified against its database).
+#      Cloudflare's 512,000,000-byte cache limit, no hard link, the store verified against its database, and on a
+#      desktop image the desktop marker and /usr/share's links, which the first activation makes).
 #
 # DOCS_LANGS (the owner's rule for any desktop image over the cache limit, 2026-11-14; plan 5.4): all, trimmed or auto
-# (the default). trimmed builds the image's generation with documentation off and English only
-# (breadstick.imageTrim), while the configuration it ships has neither setting (local.json "trimmed": true only marks
-# the image), so the first apply on the device brings documentation and the user's language back (bsl-nix boot adds
-# the device's locale to local.json's "locales"). auto builds it with both first and, when that image is at or over
-# the limit, builds the trimmed one and keeps only it.
+# (the default). No image carries a language but English (a NixOS system builds each locale it has, and the
+# configuration's locales start empty), so the trim is documentation: trimmed builds the image's generation with
+# documentation off (breadstick.imageTrim, which the user's first `bsl-nix apply` turns off, bringing documentation
+# back), and the user's language is filled in at the first desktop start by `bsl-nix languages` (the app runs it; on
+# Wi-Fi or Ethernet, as Fedora's fill). auto builds it with documentation first and, when that image is at or over the
+# limit, builds the trimmed one and keeps only it.
 #
 # MANIFEST_DIR (optional): manifest-nix-<arch>[-desktop].json for each image (RootfsDownloader.manifestName for
 # Distro.NIX), for a LOCAL check. Refused under AutoBuild/dist or a mirror.
@@ -295,7 +297,7 @@ check_one() {  # $1 = base|desktop, $2 = tarball
     mv -f "$t" "$2.rejected"; echo "ERROR: $why" >&2; return 1
   fi
   zstd -dc "$t" | tar tvf - > "$WORK/list"
-  if ! why="$(bsl_nix_listing_check "$WORK/list")"; then
+  if ! why="$(bsl_nix_listing_check "$WORK/list" "$1")"; then
     mv -f "$t" "$2.rejected"; echo "ERROR: $(basename "$2"): $why" >&2; return 1
   fi
   # The store against its own database, in a container with no network (nothing fetched or signed here).
