@@ -914,7 +914,9 @@ if os.environ.get("GROW", "1") == "1":
         o, _ = run("uname -r")
         check("kernel: the image's own pair still boots the upgraded disk (Debian and Fedora keep the old modules, Arch's keep-modules)", o.strip() == KERNEL["old"], o.strip())
         if DISTRO != "debian":
-            o, _ = run("lsmod | grep -c -e '^nft_redir' -e '^dummy'; systemctl is-active bsl-vmnet")
+            # After the boot settles (under TCG bsl-vmnet was still queued and udev still loading modules, Arch 2026-11-15).
+            o, _ = run("systemctl is-system-running --wait >/dev/null 2>&1; lsmod 2>/dev/null | grep -c -e '^nft_redir' -e '^dummy'; "
+                       "systemctl is-active bsl-vmnet")
             check("kernel: the image's own pair has its modules and networking", o.split() == ["2", "active"], o.strip().replace("\n", " | "))
     power_off(q, " (grown disk)")
 
