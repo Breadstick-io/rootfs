@@ -41,6 +41,8 @@ mkdir -p $R $G/tmp $G/shm $G/share
 cp /w/setup-user.sh $G/share/setup-user.sh
 echo "[unpack]"; s=$(date +%s)
 zstd -dc /w/image.tar.zst | tar -xpf - -C $R --no-same-owner 2>$G/tar.err; echo "  tar rc=$? ($(( $(date +%s) - s )) s, $(wc -l < $G/tar.err) error lines)"
+# DNS as the app gives it (LinuxEnvironment writes the guest's resolv.conf; the image has none).
+cp /etc/resolv.conf $R/etc/resolv.conf
 GP=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games
 B="/w/bin/proot --kill-on-exit --link2symlink --sysvipc"
 BINDS="-r $R -b /dev -b /proc -b /sys -b $G/shm:/dev/shm -b $G/share:/mnt/host"
