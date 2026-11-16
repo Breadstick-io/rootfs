@@ -161,7 +161,8 @@ round 10. None it puts back may break the restored system's dependencies: a pack
 (`apt-get check` over a trial status, `rpm -Va --nofiles` after the import, `pacman -Dk`), or one it alone breaks, is left
 out again until the check is clean or names only what the backup itself had broken (round 10 review: Debian's base image
 got the VM's breadstick-desktop back, which needs a newer apt, and every `apt-get install` exited 100).
-`test/pkgdb-merge-test.sh` runs that step for each family in a container on made-up packages.
+The restore's log (`/var/log/breadstick-vm-restore.log`) names each one left out. `test/pkgdb-merge-test.sh` runs
+that step for each family in a container on made-up packages.
 
 ## Ways in: Breadstick Settings, bsl-mcp, SSH (agent runs, plan 5.14 V13, V18)
 

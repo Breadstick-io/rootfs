@@ -3,7 +3,7 @@
 # run in a container for each family against made-up packages: a VM package whose dependencies the restored system
 # does not meet is left out, and so is one that needs it; one the system meets is put back; a package that breaks a
 # package of the backup is left out; what the backup itself had broken stays as it was. After the step the family's
-# own dependency check is clean, or names only what the backup had broken.
+# own dependency check is clean, or names only what the backup had broken, and the restore's log names each one left out.
 #
 #   vm/test/pkgdb-merge-test.sh [debian] [fedora] [archlinux]     (all three by default)
 #
@@ -45,6 +45,7 @@ for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken
   printf '%s=%s\n' $p "$v"
 done
 apt-get check -q -o Dir::State::lists=$w/apt-lists -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= 2>&1 | grep '^ ' | sed 's/^/broken: /' || true
+grep '^left out' /var/log/breadstick-vm-restore.log | sort
 BSL_PKGDB_DEB
 
 cat > "$work/debian.want" <<'BSL_PKGDB_DEBW'
@@ -57,6 +58,10 @@ bsltest-broken-by-backup=absent
 bsltest-nofiles=absent
 bsltest-oldbroken=install ok installed
 broken:  bsltest-oldbroken : Depends: bsltest-nowhere but it is not installable
+left out (dpkg): bsltest-breaker
+left out (dpkg): bsltest-broken-by-backup
+left out (dpkg): bsltest-chain
+left out (dpkg): bsltest-needy
 BSL_PKGDB_DEBW
 
 cat > "$work/fedora.sh" <<'BSL_PKGDB_FED'
@@ -88,6 +93,7 @@ cp -a /tmp/vmdb $w/rpmdb
 . /m/merge.sh
 for p in bsltest-free bsltest-needy bsltest-chain bsltest-base bsltest-oldbroken; do v=$(rpm -q $p 2>/dev/null) || v=absent; printf '%s=%s\n' $p "$v"; done
 rpm -Va --nofiles --nodigest --nosignature --noscripts 2>&1 | sed 's/^/broken: /' || true
+grep '^left out' /var/log/breadstick-vm-restore.log | sort
 BSL_PKGDB_FED
 
 cat > "$work/fedora.want" <<'BSL_PKGDB_FEDW'
@@ -99,6 +105,8 @@ bsltest-base=bsltest-base-1-1.noarch
 bsltest-oldbroken=bsltest-oldbroken-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-oldbroken-1-1.noarch:
 broken: 	bsltest-nowhere is needed by (installed) bsltest-oldbroken-1-1.noarch
+left out (rpm): bsltest-chain.noarch
+left out (rpm): bsltest-needy.noarch
 BSL_PKGDB_FEDW
 
 cat > "$work/archlinux.sh" <<'BSL_PKGDB_ARCH'
@@ -128,6 +136,7 @@ for p in bsltest-free bsltest-needy bsltest-chain bsltest-conflicted bsltest-old
   printf '%s=%s\n' $p "$(pacman -Q $p 2>/dev/null || echo absent)"
 done
 pacman -Dk 2>&1 | grep -v "^warning: database file for '.*' does not exist" | sed 's/^/broken: /' || true
+grep '^left out' /var/log/breadstick-vm-restore.log | sort
 BSL_PKGDB_ARCH
 
 cat > "$work/archlinux.want" <<'BSL_PKGDB_ARCHW'
@@ -139,6 +148,9 @@ bsltest-conflicted=absent
 bsltest-oldbroken=bsltest-oldbroken 1-1
 bsltest-picky=bsltest-picky 1-1
 broken: error: missing 'bsltest-nowhere' dependency for 'bsltest-oldbroken'
+left out (pacman): bsltest-chain
+left out (pacman): bsltest-conflicted
+left out (pacman): bsltest-needy
 BSL_PKGDB_ARCHW
 
 fails=0

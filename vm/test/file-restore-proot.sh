@@ -74,8 +74,10 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
         -o Dir::Cache::srcpkgcache= -o Debug::NoLocking=1 > "$2" 2>&1
     }
     o=0
+    bsl_out() { awk '/^Package: / { print "left out (dpkg): " $2 }' "$1" >>/var/log/breadstick-vm-restore.log; }
     if [ -s "$w/dpkg-add" ] && ! command -v apt-get >/dev/null 2>&1; then
       o=$(bsl_count "$w/dpkg-add")
+      bsl_out "$w/dpkg-add"
       : > "$w/dpkg-add"
     fi
     mkdir -p "$w/apt-lists/partial"
@@ -110,6 +112,7 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
       i=$((i + 1))
       if [ "$i" -gt 50 ]; then
         o=$((o + $(bsl_count "$w/dpkg-add")))
+        bsl_out "$w/dpkg-add"
         : > "$w/dpkg-add"
         break
       fi
@@ -118,6 +121,7 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
         { n = ""; c = split($0, L, "\n"); for (j = 1; j <= c; j++) if (L[j] ~ /^Package: /) n = substr(L[j], 10); if (!(n in b)) print }' \
         "$w/dpkg-add" > "$w/dpkg-add.1"
       o=$((o + $(bsl_count "$w/dpkg-add") - $(bsl_count "$w/dpkg-add.1")))
+      sed 's/^/left out (dpkg): /' "$w/dpkg-bad" >>/var/log/breadstick-vm-restore.log
       mv -f "$w/dpkg-add.1" "$w/dpkg-add"
     done
     if [ -s "$w/dpkg-add" ]; then
@@ -167,6 +171,7 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
         awk -F '\t' 'FILENAME == ARGV[1] { b[$0] = 1; next } ($1 in b) { print $2 }' "$w/rpm-bad" "$w/rpm-vm" \
           | xargs rpm -e --justdb --nodeps --noscripts --notriggers --allmatches 2>>/var/log/breadstick-vm-restore.log
         grep -vxF -f "$w/rpm-bad" "$w/rpm-add" > "$w/rpm-add.1" || true
+        sed 's/^/left out (rpm): /' "$w/rpm-bad" >>/var/log/breadstick-vm-restore.log
         o=$((o + $(wc -l < "$w/rpm-bad")))
         mv -f "$w/rpm-add.1" "$w/rpm-add"
       done
@@ -209,6 +214,7 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
         i=$((i + 1))
         if [ ! -s "$w/pac-bad" ] || [ "$i" -gt 50 ]; then cp "$w/pac-kept" "$w/pac-bad"; fi
         cut -f 2 "$w/pac-bad" | while IFS= read -r d; do mv "$d" "$w/pac-out/"; done
+        cut -f 1 "$w/pac-bad" | sed 's/^/left out (pacman): /' >>/var/log/breadstick-vm-restore.log
         awk -F '\t' 'FILENAME == ARGV[1] { b[$1] = 1; next } !($1 in b)' "$w/pac-bad" "$w/pac-kept" > "$w/pac-kept.1"
         o=$((o + $(wc -l < "$w/pac-bad")))
         mv -f "$w/pac-kept.1" "$w/pac-kept"

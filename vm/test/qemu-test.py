@@ -1357,6 +1357,8 @@ def proot_restore_test():
     o, st = run(open("/t/file-restore-proot.sh").read())
     check("proot restore: laid over the system", st == 0 and "restored" in o, o.strip()[-300:])
     said = " | ".join(l for l in o.splitlines() if l.startswith(("package database", "systemd-sysusers")))
+    left, _ = run("grep '^left out (' /var/log/breadstick-vm-restore.log 2>/dev/null | tr '\\n' ' '")
+    said += f" | {left.strip()}" if left.strip() else ""
     power_off(q, " (proot restored)")
     q = boot(" (after the proot restore)")
     o, st = run(PREPARE_USER)
