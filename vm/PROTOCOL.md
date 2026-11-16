@@ -127,6 +127,14 @@ modes back to its own, Arch's stubs, masked hooks and DisableSandbox). Fedora bo
 installed). The manifest is `<distro>/manifest-vm-<arch>.json` beside Debian's `manifest-vm-<arch>.json`; image.json
 carries `"distro"`.
 
+A desktop VM image (round 10) is baked from the `-desktop-` proot image, which brings breadstick-desktop (the session
+script the app runs in the VM, the theme, the tools) and XFCE; package-fixups' own DisableSandbox block in pacman.conf
+comes out too, and `/run/bsl/engine` says `vm` while the step runs, so no Breadstick hook puts a proot workaround back.
+`STAGE=<RPM or pacman stage>` brings Breadstick's installed packages up to a local stage's versions first (the image is
+then named `-staged-`). `test/rpm-refresh.sh` is a copy of the RPM VM's daily refresh (Android
+`VmGuestUpdate.refreshScript`, the proot RPM system's own `PackageOps.Dnf.refreshRun`), which qemu-test.py runs with
+`RPM_STAGE=`.
+
 ## Terminal tabs (agent runs, plan 5.14 V9)
 
 A tab is the user's tmux on a socket of the tab's own (`/tmp/.breadstick-tmux-<uid>-<key>`, `new-session -A`), so it
@@ -142,7 +150,11 @@ owners and extended attributes; the app writes it into the same format-2 archive
 streams the backup's files into `test/file-unpack-vm.sh` (a VM's backup: owners kept) or `test/file-unpack-proot.sh`
 (a proot system's: everything root's, each home folder given to its account), which unpack into
 `/var/lib/breadstick-vm/restore`; only a whole backup is then laid over the system by `test/file-restore.sh`, which
-leaves the image's VM guest in place, and the app restarts the VM.
+leaves the image's VM guest in place, and the app restarts the VM. A proot system's backup is laid over by
+`test/file-restore-proot.sh`, which also keeps the image's own files (its kernel, systemd, D-Bus), makes the system
+accounts their packages declare (`systemd-sysusers`) and, at the end, puts the VM's own packages back in the restored
+package database (dpkg's status, rpm's database through `rpmdb --importdb`, pacman's kept entries without duplicates),
+round 10.
 
 ## Ways in: Breadstick Settings, bsl-mcp, SSH (agent runs, plan 5.14 V13, V18)
 

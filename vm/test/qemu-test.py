@@ -291,6 +291,49 @@ def staged_upgrade():
 if os.path.isdir("/repo"):
     staged_upgrade()
 
+
+def rpm_refresh():
+    """Round 10 (plan 5.14 V15): the RPM VM's daily refresh, the app's own text (rpm-refresh.sh, a copy of Android
+    VmGuestUpdate.refreshScript that VmGuestUpdateTest checks), run as root as the session start runs it, against an
+    RPM stage (qemu-test.sh RPM_STAGE=: /rpmrepo in this container, bound at /bsl-stage in the VM, where a -staged-
+    image's breadstick.repo names it). It must put back a Breadstick package that is missing, change nothing that is
+    not Breadstick's, leave no package-run marker, and with the stage gone end 75 (the day not marked done), never 0."""
+    o, st = run("grep -qx 'baseurl=file:///bsl-stage/fedora/$releasever/$basearch/' /etc/yum.repos.d/breadstick.repo || exit 77")
+    if st == 77:
+        print("SKIP rpm refresh (the image's breadstick.repo does not name /bsl-stage)")
+        return
+    h = share_open()
+    check("rpm refresh: the stage reaches the VM", h is not None)
+    if h is None:
+        return
+    o, st = run("mkdir -p /bsl-stage && mount --bind /mnt/host/rpmrepo /bsl-stage && test -s /bsl-stage/RPM-GPG-KEY-breadstick && echo bound")
+    check("rpm refresh: the stage bound at /bsl-stage", "bound" in o, o.strip())
+    others = "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' | grep -v -e '^breadstick-' -e '^gpg-pubkey-' | sort"
+    # The first refresh of an image from the desktop proot image installs breadstick-print, which the image does not
+    # carry (the refresh installs it "when the repository has it", on proot as here), with its own dependencies (CUPS).
+    o, st = run(open("/t/rpm-refresh.sh").read())
+    tail = " | ".join(o.strip().splitlines()[-4:])
+    check("rpm refresh: ends 0 with Breadstick's index fresh", st == 0 and "refresh exit 0" in o, f"exit {st}: {tail}")
+    # Then, with nothing else to do: breadstick-print taken away (its dependencies left), the refresh puts back only it.
+    run(f"{others} > /tmp/r10-before; rpm -e --nodeps breadstick-print")
+    o, st = run(open("/t/rpm-refresh.sh").read())
+    check("rpm refresh: again, ends 0", st == 0 and "refresh exit 0" in o, f"exit {st}: {' | '.join(o.strip().splitlines()[-2:])}")
+    o, _ = run(f"rpm -q breadstick-print; {others} > /tmp/r10-after; diff /tmp/r10-before /tmp/r10-after | grep -c '^[<>]'; "
+               "test -e /var/lib/breadstick/package-run || echo no-marker; test -e /var/lib/breadstick/package-run.cut || echo no-cut")
+    lines = o.split()
+    check("rpm refresh: the missing Breadstick package back, nothing else changed, no marker left",
+          o.startswith("breadstick-print-") and "0" in lines and "no-marker" in lines and "no-cut" in lines, o.strip().replace("\n", " | "))
+    run("umount /bsl-stage")
+    o, st = run(open("/t/rpm-refresh.sh").read())
+    check("rpm refresh: with the stage gone, exit 75 (not marked done)", st == 75 and "did not refresh" in o,
+          f"exit {st}: {' | '.join(o.strip().splitlines()[-2:])}")
+    run("test -e /var/lib/breadstick/package-run && echo marker-left")
+    share_close(h)
+
+
+if os.path.isdir("/rpmrepo") and DISTRO == "fedora":
+    rpm_refresh()
+
 class Chan:
     """An agent 'r' run kept open: stdin sent as it comes, output gathered by a thread (bytes)."""
 
@@ -1207,6 +1250,8 @@ def proot_restore_test():
     if not os.path.exists("/w/proot.tar"):
         return
     q = boot(" (for the proot restore)")
+    # The units that fail in this VM before the restore (none, as a rule): the restore may add none (round 10, M6).
+    failed_before, _ = run("systemctl is-system-running --wait >/dev/null; systemctl --failed --no-legend --plain | cut -d' ' -f1 | sort")
     # Made after the image's list and not in the backup: the restore takes it away (round 9 review).
     run("echo after > /etc/r9-after-image.conf")
     # The image's folder modes (Fedora's /root is 0550, Arch's 0750, Debian's 0700) and the VM's own machine id, which
@@ -1217,6 +1262,7 @@ def proot_restore_test():
     check("proot restore: unpacked into the stage, owners root's", st == 0, f"exit {st} {o.strip()[-200:]}")
     o, st = run(open("/t/file-restore-proot.sh").read())
     check("proot restore: laid over the system", st == 0 and "restored" in o, o.strip()[-300:])
+    said = " | ".join(l for l in o.splitlines() if l.startswith(("package database", "systemd-sysusers")))
     power_off(q, " (proot restored)")
     q = boot(" (after the proot restore)")
     o, st = run(PREPARE_USER)
@@ -1240,6 +1286,24 @@ def proot_restore_test():
           f"before {vm_id.strip()!r}, after {o.split()[4:5]}")
     o, st = run("systemctl is-system-running --wait; systemctl --failed --no-legend --plain | cut -d' ' -f1 | tr '\\n' ' '")
     check("proot restore: systemd after it", "running" in o or "degraded" in o, o.strip().replace("\n", " | "))
+    new = sorted(set(o.split()[1:]) - set(failed_before.split()))
+    check("proot restore: no unit fails that did not fail before it (round 10, M6)", o.split()[:1] == ["running"] or not new,
+          f"{o.strip()} (before: {failed_before.strip() or 'none'})")
+    # Round 10 (M6, the cross-engine restore row): the package database names the VM's own kernel and systemd, nothing
+    # is listed twice, and the family's own database check is clean.
+    owns = {"debian": "dpkg -S", "fedora": "rpm -qf", "archlinux": "pacman -Qo"}[DISTRO]
+    kfile = "/boot/vmlinuz-$(uname -r)" if DISTRO == "debian" else "/usr/lib/modules/$(uname -r)/vmlinuz"
+    pid1 = "$(readlink -f /proc/1/exe)"
+    dups = {"debian": "dpkg-query -W -f='${Package}:${Architecture}\\n' | sort | uniq -d",
+            "fedora": "rpm -qa --qf '%{NAME}.%{ARCH}\\n' | grep -v -e '^gpg-pubkey' -e '^kernel' | sort | uniq -d",
+            "archlinux": "pacman -Qq | sort | uniq -d"}[DISTRO]
+    audit = {"debian": "dpkg --audit", "fedora": "rpm -q --whatprovides /usr/bin/bash >/dev/null", "archlinux": "pacman -Dk >/dev/null"}[DISTRO]
+    o, st = run(f"{owns} {kfile} >/dev/null 2>&1 && echo kernel-owned; p={pid1}; {owns} \"$p\" >/dev/null 2>&1 || "
+                f"{owns} \"${{p#/usr}}\" >/dev/null 2>&1 && echo systemd-owned; echo dups=$({dups} | wc -l); "
+                f"o=$({audit} 2>&1); r=$?; echo audit=$r $(printf '%s' \"$o\" | wc -l)")
+    check("proot restore: the package database names the VM's own kernel and systemd, nothing twice, its check clean",
+          "kernel-owned" in o and "systemd-owned" in o and "dups=0" in o and "audit=0 0" in o,
+          o.strip().replace("\n", " | ") + f" (restore: {said})")
     power_off(q, " (proot restore done)")
 
 

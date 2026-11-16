@@ -28,6 +28,14 @@ chmod 1777 /var/tmp && chmod 0700 /root
 # The VM's own identity; a proot system's is empty (round 9 review: laid over the VM's, it made the next boot a first boot).
 printf '0123456789abcdef0123456789abcdef\n' > /etc/machine-id
 useradd -m -u 1000 -s /bin/sh tester 2>/dev/null
+# A package of the VM's image that a proot system never has (round 10, M6: the VM's kernel, systemd, D-Bus...), in dpkg's
+# database with its file list, and one installed after the image list (the restore takes its files and its list away).
+fakepkg() {  # name file
+    printf 'Package: %s\nStatus: install ok installed\nPriority: optional\nSection: misc\nMaintainer: Breadstick <test@invalid>\nArchitecture: all\nVersion: 1.0\nDescription: a test package\n\n' "$1" >> /var/lib/dpkg/status
+    printf '/.\n%s\n' "$2" > "/var/lib/dpkg/info/$1.list"
+    (cd / && md5sum "${2#/}") > "/var/lib/dpkg/info/$1.md5sums"
+}
+fakepkg bsl-vm-only /usr/share/bsl-image-only.txt
 sh /t/image-files.sh > /tmp/r1 2>&1
 say image-files "$(cat /tmp/r1) $(gzip -dc /var/lib/breadstick-vm/image-files.gz | grep -cx '/usr/share/bsl-image-only.txt')"
 sh /t/image-files.sh > /tmp/r2 2>&1
@@ -36,6 +44,7 @@ say image-files-again "$(cat /tmp/r2 | wc -c)"
 printf 'after\n' > /etc/bsl-after-image.conf
 mkdir -p /opt/bsl-after/sub && printf 'x\n' > /opt/bsl-after/sub/x
 printf 'after\n' > /home/tester/after.txt
+fakepkg bsl-vm-later /etc/bsl-after-image.conf
 
 # 2. A proot system's backup: this system copied, then made the way a proot system is.
 P=/tmp/proot
@@ -46,6 +55,10 @@ tar --create --file=- --one-file-system --exclude=./tmp --exclude=./proc --exclu
 mkdir -p "$P/tmp" "$P/proc" "$P/sys" "$P/dev"
 rm -f "$P/etc/bsl-after-image.conf" "$P/home/tester/after.txt" "$P/usr/share/bsl-image-only.txt" "$P/etc/hosts.vm"
 rm -rf "$P/opt/bsl-after"
+# The proot system's own database: without the two packages above.
+awk 'BEGIN { RS = ""; ORS = "\n\n" } !/^Package: bsl-vm-(only|later)\n/' "$P/var/lib/dpkg/status" > "$P/var/lib/dpkg/status.new"
+mv "$P/var/lib/dpkg/status.new" "$P/var/lib/dpkg/status"
+rm -f "$P"/var/lib/dpkg/info/bsl-vm-only.* "$P"/var/lib/dpkg/info/bsl-vm-later.*
 printf 'from the backup\n' > "$P/etc/bsl-from-backup.conf"
 printf 'kept\n' > "$P/home/tester/keep.txt"
 printf 'backup copy\n' > "$P/usr/share/bsl-image-group.txt"
@@ -90,6 +103,8 @@ say proot-hosts "$(grep -c proot /etc/hosts)"
 say proot-machine-id "$(cat /etc/machine-id)"
 say proot-files "$(yn test -f /etc/bsl-from-backup.conf) $(yn test ! -e /etc/bsl-after-image.conf) $(yn test ! -e /opt/bsl-after) $(yn test ! -e /home/tester/after.txt) $(yn test -f /usr/share/bsl-image-only.txt) $(yn test -f /etc/hosts.vm)"
 say proot-left "$(yn test ! -e $S) $(yn test ! -e /var/lib/breadstick-vm/restore.work) $(yn test -s /var/lib/breadstick-vm/image-files.gz)"
+# The VM's own package is in the database again, the later one is not, nothing is listed twice and dpkg finds it sound.
+say proot-dpkg "$(sed -n 's/^package database (dpkg): .*: //p' /tmp/r.log) $(dpkg-query -W -f='${Status}' bsl-vm-only 2>&1) | $(yn test ! -e /var/lib/dpkg/info/bsl-vm-later.list) $(dpkg-query -W bsl-vm-later >/dev/null 2>&1 && echo listed || echo unlisted) $(grep -c '^Package: base-files$' /var/lib/dpkg/status) $(dpkg --audit 2>&1 | wc -l)"
 
 # 3. A VM's own backup of the system as it is now, restored after changes: exactly the backup comes back.
 printf 'vm kept\n' > /home/tester/vm-keep.txt && chown tester /home/tester/vm-keep.txt

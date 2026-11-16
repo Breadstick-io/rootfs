@@ -29,6 +29,22 @@
 # Breadstick's repository is NOT used by the bake (rpm.breadstick.io and pacman.breadstick.io are empty until the 4.0
 # publish): only the distribution's own mirrors, the repository left in the image as FROM has it.
 #
+# A DESKTOP VM image (round 10) is baked from a -desktop- FROM: the proot desktop image, which carries
+# breadstick-desktop (the session script the app runs in the VM, the theme, the tools) and XFCE. What the proot image's
+# own Breadstick packages did under proot comes out as for the base image, plus package-fixups' DisableSandbox block
+# in pacman.conf (the same lines a restore into the VM takes out, Android VmFileBackup.unpackScript). While the step
+# runs, /run/bsl/engine says "vm" (removed before the disk is made, as bake-vm.sh does for Debian), so every Breadstick
+# hook a transaction runs (package-fixups after each dnf or pacman run) takes the VM's way and puts nothing of proot's
+# back.
+#   STAGE=<abs stage> (optional): Breadstick's installed packages brought up to the stage's versions in the image, so a
+#   VM image carries the session, theme and tools of a packages tree that is not published yet. Fedora: an RPM stage
+#   (Apt/rpm/stage-rpm-repo.sh), mounted at /bsl-stage, where a -staged- Fedora image's breadstick.repo already points
+#   (FROM must be -staged-); `dnf upgrade --from-repo=breadstick` of every installed breadstick-* package (their
+#   dependencies from Fedora's repositories). Arch: a pacman stage (Apt/pacman/stage-pacman-repo.sh, TEST=1 for
+#   [breadstick-test]), mounted at /bsl-stage and named only in the bake's own pacman configuration (the image's
+#   pacman.conf keeps pacman.breadstick.io), so the bake's one -Syu also brings them up to the stage's. Either way the
+#   bake fails unless breadstick-session ends at the stage's version, and the VM image is named -staged-.
+#
 # Output in OUT_DIR (default rootfs/dist/vm): <name>/{vmlinuz, initrd.img, root.img.zst, image.json} and
 # <distro>/manifest-vm-<arch>.json, the path the 4.0 app reads (VmManifest.manifestName: cdn.breadstick.io/rootfs/
 # <distro>/manifest-vm-<arch>.json; base "vm/<name>/" as Debian's). Named <distro>-<release>-<arch>-vm[-staged]-<stamp>
@@ -58,6 +74,30 @@ DESKTOP=0
 case "$base" in *-desktop-*) DESKTOP=1 ;; esac
 STAGED=
 case "$base" in *-staged-*) STAGED=-staged ;; esac
+STAGE="${STAGE:-}"
+STAGE_REPO=
+MOUNT_STAGE=()
+if [ -n "$STAGE" ]; then
+  case "$STAGE" in /*) ;; *) echo "STAGE must be an absolute path" >&2; exit 2 ;; esac
+  if [ "$DISTRO" = fedora ]; then
+    rarch=$([ "$ARCH" = arm64 ] && echo aarch64 || echo x86_64)
+    [ -f "$STAGE/fedora/$RELEASE/$rarch/repodata/repomd.xml.asc" ] \
+      || { echo "STAGE: $STAGE is not an RPM stage for Fedora $RELEASE $rarch (Apt/rpm/stage-rpm-repo.sh)" >&2; exit 2; }
+    # The stage is where a -staged- image's breadstick.repo points (file:///bsl-stage/...); a published image's names
+    # rpm.breadstick.io, which this bake never rewrites.
+    [ -n "$STAGED" ] || { echo "STAGE: FROM must be a -staged- image (its breadstick.repo names /bsl-stage)" >&2; exit 2; }
+  else
+    n=0
+    for d in "$STAGE"/*/os/x86_64; do
+      [ -f "$d/$(basename "$(dirname "$(dirname "$d")")").db" ] || continue
+      STAGE_REPO=$(basename "$(dirname "$(dirname "$d")")"); n=$((n + 1))
+    done
+    [ "$n" = 1 ] && case "$STAGE_REPO" in breadstick|breadstick-test) true ;; *) false ;; esac \
+      || { echo "STAGE: $STAGE is not one pacman stage (Apt/pacman/stage-pacman-repo.sh: <repo>/os/x86_64/<repo>.db)" >&2; exit 2; }
+  fi
+  STAGED=-staged
+  MOUNT_STAGE=(-v "$STAGE:/bsl-stage:ro")
+fi
 NAME="$DISTRO-$RELEASE-$ARCH-vm$STAGED-$STAMP"
 mkdir -p "$OUT_DIR"
 OUT_DIR=$(cd "$OUT_DIR" && pwd)
@@ -88,10 +128,20 @@ zstd -q -dc "$FROM" | docker import --platform "linux/$ARCH" - "$P:from" >/dev/n
 # The step, run as root in the imported system. Its own file (no heredoc whose content could end it early).
 cat > "$WORK/step.sh" <<'BSL_VM_DISTRO_STEP_51c8'
 set -eu
-DISTRO=$1 DESKTOP=$2
+DISTRO=$1 DESKTOP=$2 STAGE=${3:-} STAGE_REPO=${4:-}
 G=/bsl-guest
 say() { echo "[vm-step] $*"; }
 install -m 0755 "$G/files/bsl-unzboot" /usr/local/sbin/bsl-unzboot.bake
+# Breadstick's hooks (package-fixups after every dnf or pacman run) take the VM's way while the step runs
+# (/usr/lib/breadstick/bsl-engine reads this; in the VM the app writes it at every boot). Removed at the end.
+mkdir -p /run/bsl
+echo vm > /run/bsl/engine
+# breadstick-session's version: rpm's or pacman's, empty when it is not installed.
+bsl_session_version() {
+    if [ "$DISTRO" = fedora ]; then rpm -q --qf '%{VERSION}-%{RELEASE}' breadstick-session 2>/dev/null || true
+    else pacman -Q breadstick-session 2>/dev/null | cut -d' ' -f2; fi
+}
+say "breadstick-session in FROM: $(bsl_session_version)"
 if [ "$DISTRO" = fedora ]; then
     D="dnf -y --setopt=install_weak_deps=False --disablerepo=breadstick"
     say "1. kernel-install and dracut settings, then the kernel and the VM's packages"
@@ -125,6 +175,16 @@ if [ "$DISTRO" = fedora ]; then
     rpm -V sudo filesystem > /tmp/v || true
     ! grep -E '^.M' /tmp/v || { echo "modes still differ from Fedora's" >&2; exit 1; }
     systemctl mask dnf-makecache.timer >/dev/null 2>&1 || true
+    if [ -n "$STAGE" ]; then
+        say "   Breadstick's packages from the stage (dnf upgrade --from-repo=breadstick)"
+        grep -q '^baseurl=file:///bsl-stage/' /etc/yum.repos.d/breadstick.repo || { echo "breadstick.repo does not name /bsl-stage" >&2; exit 1; }
+        want=$(dnf -y -q --refresh --repo=breadstick repoquery --latest-limit=1 --qf '%{version}-%{release}\n' breadstick-session | tail -n 1)
+        [ -n "$want" ] || { echo "the stage has no breadstick-session" >&2; exit 1; }
+        P=$(rpm -qa --qf '%{NAME}\n' 'breadstick-*' | sort -u | tr '\n' ' ')
+        # shellcheck disable=SC2086
+        dnf -y --setopt=install_weak_deps=False upgrade --refresh --from-repo=breadstick $P
+        [ "$(bsl_session_version)" = "$want" ] || { echo "breadstick-session is $(bsl_session_version), the stage's $want" >&2; exit 1; }
+    fi
     # Each user's session bus (the app's user script waits for /run/user/<uid>/bus): dbus-broker's user socket, which
     # its package's preset leaves off when installed in a container.
     systemctl --global enable dbus.socket >/dev/null
@@ -133,13 +193,24 @@ if [ "$DISTRO" = fedora ]; then
 else
     say "1. pacman for the bake (Arch's mirrors only; the image's own pacman.conf, less its proot-only DisableSandbox)"
     PC=/etc/pacman.conf
-    awk '/^# Breadstick Linux \(the image bake\): no download sandbox under proot\.$/ { getline; next } { print }' "$PC" > /tmp/pc.new
-    ! grep -q '^DisableSandbox' /tmp/pc.new || { echo "pacman.conf: DisableSandbox not in the bake's own block" >&2; exit 1; }
+    # The image bake's block and, in a desktop image, package-fixups' (the same lines a restore into the VM takes out:
+    # Android VmFileBackup.unpackScript).
+    awk '/^# Breadstick Linux \((the image bake|package-fixups)\): no download sandbox under proot\.$/ { d = 1; next }
+        d && /^[ \t]*DisableSandbox[ \t]*$/ { d = 0; next } { d = 0; print }' "$PC" > /tmp/pc.new
+    ! grep -q '^DisableSandbox' /tmp/pc.new || { echo "pacman.conf: DisableSandbox not in a Breadstick block" >&2; exit 1; }
     cat /tmp/pc.new > "$PC"
     rm -f /tmp/pc.new
     # The bake's own configuration: no [breadstick] (its server is empty until the 4.0 publish), and no sandbox, which
     # qemu-user (this bake on an arm64 host) cannot give pacman.
     awk 'BEGIN { s = 0 } /^\[/ { s = ($0 ~ /^\[breadstick/) } !s { print } /^\[options\]/ { print "DisableSandbox" }' "$PC" > /tmp/bake.conf
+    if [ -n "$STAGE" ]; then
+        # The stage, after every Arch repository (pacman takes a package from the first that has its name), in the bake's
+        # configuration only.
+        printf '\n[%s]\nSigLevel = Required DatabaseRequired\nServer = file:///bsl-stage/$repo/os/$arch\n' "$STAGE_REPO" >> /tmp/bake.conf
+        want=$(pacman --config /tmp/bake.conf -Sy >/dev/null && pacman --config /tmp/bake.conf -Si "$STAGE_REPO/breadstick-session" | sed -n 's/^Version *: *//p')
+        [ -n "$want" ] || { echo "the stage has no breadstick-session" >&2; exit 1; }
+        say "   Breadstick's packages come from the stage's [$STAGE_REPO] (breadstick-session $want)"
+    fi
     say "2. the proot stubs and masks out"
     for t in systemctl systemd-tmpfiles setpriv; do
         f=/usr/local/bin/$t
@@ -166,6 +237,11 @@ else
     pacman --config /tmp/bake.conf -Syu --noconfirm --needed linux mkinitcpio systemd kmod e2fsprogs iproute2 \
         nftables sshfs zram-generator util-linux sudo shadow procps-ng python zstd tmux curl $X
     [ -s /boot/vmlinuz-linux ] && [ -s /boot/initramfs-linux.img ] || { echo "no /boot/vmlinuz-linux and initramfs-linux.img" >&2; ls -la /boot >&2; exit 1; }
+    if [ -n "$STAGE" ]; then
+        [ "$(bsl_session_version)" = "$want" ] || { echo "breadstick-session is $(bsl_session_version), the stage's $want" >&2; exit 1; }
+    fi
+    # Nothing of proot's came back with the transaction (package-fixups ran after it, as in the VM).
+    ! grep -q '^DisableSandbox' "$PC" || { echo "pacman.conf: DisableSandbox came back" >&2; exit 1; }
     [ ! -e /boot/initramfs-linux-fallback.img ] || { echo "a fallback initramfs was made" >&2; exit 1; }
     say "   largest packages: $(pacman -Qi | awk '/^Name/ { n = $3 } /^Installed Size/ { print $4 $5 "=" n }' | sort -h | tail -n 8 | tr '\n' ' ')"
     lsinitcpio /boot/initramfs-linux.img > /tmp/lsinit
@@ -196,7 +272,14 @@ systemctl mask serial-getty@ttyS0.service serial-getty@hvc0.service getty@tty1.s
 systemctl mask systemd-firstboot.service >/dev/null
 systemctl --global mask pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true
 passwd -l root >/dev/null
+if [ "$DESKTOP" = 1 ]; then
+    [ -f /usr/lib/breadstick/start-desktop-x11.sh ] && [ -e /etc/breadstick/desktop-ok ] \
+        || { echo "a -desktop- image without breadstick-session's session script or the desktop-ok marker" >&2; exit 1; }
+    command -v xfce4-session >/dev/null || { echo "a -desktop- image without XFCE" >&2; exit 1; }
+fi
+say "breadstick-session in the VM image: $(bsl_session_version)"
 say "5. cleaning"
+rm -rf /run/bsl
 rm -f /usr/local/sbin/bsl-unzboot.bake
 rm -f /etc/machine-id /var/lib/systemd/random-seed
 [ "$DISTRO" = fedora ] && { : > /etc/machine-id; dnf -q clean all; rm -rf /var/cache/dnf/* /var/cache/libdnf5/* /var/log/dnf*; }
@@ -206,7 +289,7 @@ BSL_VM_DISTRO_STEP_51c8
 
 log "the VM step (desktop=$DESKTOP)"
 docker create --name "$P-step" --platform "linux/$ARCH" -v "$WORK/guest:/bsl-guest:ro" -v "$WORK/step.sh:/bsl-step.sh:ro" \
-  "$P:from" sh /bsl-step.sh "$DISTRO" "$DESKTOP" >/dev/null
+  "${MOUNT_STAGE[@]}" "$P:from" sh /bsl-step.sh "$DISTRO" "$DESKTOP" "$STAGE" "$STAGE_REPO" >/dev/null
 docker start -a "$P-step"
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$P-step")" = 0 ] || { echo "the VM step failed" >&2; exit 1; }
 
@@ -220,6 +303,7 @@ docker run --rm --platform "linux/$HOST_ARCH" -e OWNER="$(id -u):$(id -g)" -e DI
   tar -C /r --numeric-owner --xattrs -xpf /s/root.tar
   rm -f /r/.dockerenv /r/bsl-step.sh
   rmdir /r/bsl-guest 2>/dev/null || true
+  rmdir /r/bsl-stage 2>/dev/null || true
   if [ "$DISTRO" = fedora ]; then
     v=$(ls /r/usr/lib/modules | head -n 1)
     cp -L "/r/boot/vmlinuz-$v" /o/vmlinuz; cp -L "/r/boot/initramfs-$v.img" /o/initrd.img

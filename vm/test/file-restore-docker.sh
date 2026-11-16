@@ -5,7 +5,8 @@
 # review: a proot system's backup restored into the VM gets the image's programs for proot's stand-ins, loses Arch's
 # masks and DisableSandbox line, keeps the image's folder modes, owners and own files, the VM's hosts file and guest,
 # and loses every file the system got after the image that the backup does not have; a VM's own backup comes back
-# exactly. Both keep the running VM's /etc/machine-id. Exit 1 on any difference from the lines below. qemu-test.py runs the same scripts in a booted VM.
+# exactly. Both keep the running VM's /etc/machine-id. Round 10 (M6): after the proot restore dpkg's database lists the VM
+# image's own package again, never one the restore took away, nothing twice. Exit 1 on any difference from the lines below. qemu-test.py runs the same scripts in a booted VM.
 #
 #   vm/test/file-restore-docker.sh
 set -u
@@ -27,6 +28,7 @@ proot-hosts: 0
 proot-machine-id: 0123456789abcdef0123456789abcdef
 proot-files: yes yes yes yes yes yes
 proot-left: yes yes yes
+proot-dpkg: 1 install ok installed | yes unlisted 1 0
 vm-backup-rc: 0
 vm-unpack-rc: 0
 vm-restore-rc: 0
@@ -38,7 +40,7 @@ empty-stage-rc: 3
 empty-stage-kept: yes
 BSL_FRD_WANT_4k8
 }
-got=$(docker run --rm --network none --platform "linux/$(dpkg --print-architecture)" --name "bsl-r9-vm-frd-$$" \
+got=$(docker run --rm --network none --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vm-frd-$$}" \
     -v "$here:/t:ro" debian:trixie sh /t/file-restore-docker.inner.sh 2>&1)
 if [ "$got" = "$(want)" ]; then
     echo "ok   file-restore-docker: $(want | wc -l) checks"

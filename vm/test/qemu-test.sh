@@ -6,6 +6,7 @@
 # clean power-off. Debian, Fedora and Arch images alike (image.json's "distro", plan 5.14 V4).
 #   vm/test/qemu-test.sh <image folder from bake-vm.sh> [arm64|amd64]
 #   STAGED_REPO=<stage> vm/test/qemu-test.sh ...   # first upgrade breadstick-desktop from a staged repo
+#   RPM_STAGE=<RPM stage> vm/test/qemu-test.sh ...  # Fedora: the app's daily refresh (rpm-refresh.sh) against it
 #   AGENT_DIR=<dir> vm/test/qemu-test.sh ...       # today's guest programs (vm/guest/build.sh) in the test's disk
 #   KERNEL=0 vm/test/qemu-test.sh ...              # skip the disk's-own-kernel test (it installs a kernel: 4 boots)
 #   GROW=0 FILEBACKUP=0 vm/test/qemu-test.sh ...   # skip the disk growth (a boot) and the file backup round trip (a boot)
@@ -56,9 +57,15 @@ ASSETS=${ANDROID_ASSETS:-$here/../../../Android/app/src/main/assets/vm}
 # STAGED_REPO=<Apt/publish.sh stage> (AutoBuild test/gate.sh's VM stage): the VM first upgrades
 # breadstick-desktop from it, read-only through /mnt/host; STAGED_SUITE=breadstick-test for a TEST=1 stage.
 R=
+# RPM_STAGE=<Apt rpm/stage-rpm-repo.sh stage> (round 10): a Fedora image's daily refresh (the app's own text,
+# rpm-refresh.sh) is run against it, read-only at /rpmrepo here and bound at /bsl-stage in the VM.
+if [ -n "${RPM_STAGE:-}" ]; then
+  [ -f "$RPM_STAGE/RPM-GPG-KEY-breadstick" ] || { echo "RPM_STAGE $RPM_STAGE has no RPM-GPG-KEY-breadstick" >&2; exit 2; }
+  R="-v $(cd "$RPM_STAGE" && pwd):/rpmrepo:ro"
+fi
 if [ -n "${STAGED_REPO:-}" ]; then
   [ -s "$STAGED_REPO/dists/${STAGED_SUITE:-breadstick}/InRelease" ] || { echo "STAGED_REPO $STAGED_REPO has no dists/${STAGED_SUITE:-breadstick}/InRelease" >&2; exit 2; }
-  R="-v $(cd "$STAGED_REPO" && pwd):/repo:ro -e STAGED_SUITE=${STAGED_SUITE:-breadstick}"
+  R="$R -v $(cd "$STAGED_REPO" && pwd):/repo:ro -e STAGED_SUITE=${STAGED_SUITE:-breadstick}"
 fi
 docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $AGENT_ENV -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:3 python3 /t/qemu-test.py
