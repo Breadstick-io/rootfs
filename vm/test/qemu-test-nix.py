@@ -40,6 +40,9 @@ else:
 # The image's own line, its console swapped for QEMU's machine's.
 line = " ".join(w for w in manifest["cmdline"].split() if not w.startswith("console=") and w != "quiet")
 cmdline = f"{console} {line} bsl.vm=1"
+# The run's first line, as qemu-test.py's: AutoBuild's test/parity reads a log's runs from it to "all passed" or
+# "N failed: ...", so a log holding a run cut off beside a finished one is never read as one finished run.
+print(f"image: {manifest.get('name', '(no name)')}, distro nix, kernel line: {cmdline}", flush=True)
 check("the kernel line names the system profile's init", "init=/nix/var/nix/profiles/system/init" in cmdline, cmdline)
 check("image.json says nix", manifest.get("distro") == "nix", str(manifest.get("distro")))
 
