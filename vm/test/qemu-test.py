@@ -2124,6 +2124,9 @@ def proot_restore_test():
     said = " | ".join(l for l in o.splitlines() if l.startswith(("package database", "systemd-sysusers")))
     left, _ = run("grep '^left out (' /var/log/breadstick-vm-restore.log 2>/dev/null | tr '\\n' ' '")
     said += f" | {left.strip()}" if left.strip() else ""
+    gone, _ = run("grep '^taken away (' /var/log/breadstick-vm-restore.log 2>/dev/null | tr '\\n' ' '")
+    if gone.strip():
+        print(f"proot restore: {gone.strip()}", flush=True)
     power_off(q, " (proot restored)")
     q = boot(" (after the proot restore)")
     o, st = run(PREPARE_USER)
@@ -2155,6 +2158,11 @@ def proot_restore_test():
     # --audit passed a status where breadstick-desktop needed a newer apt and every apt-get install exited 100).
     owns = {"debian": "dpkg -S", "fedora": "rpm -qf", "archlinux": "pacman -Qo"}[DISTRO]
     kfile = "/boot/vmlinuz-$(uname -r)" if DISTRO == "debian" else "/usr/lib/modules/$(uname -r)/vmlinuz"
+    if DISTRO == "archlinux":
+        # Round 11: after the kernel test the image's pair runs on modules keep-modules copied, which no package owns by
+        # design (breadstick-kept); the VM's own kernel package is the one whose modules folder has its pkgbase.
+        kfile = ("$(k=/usr/lib/modules/$(uname -r); [ ! -e $k/breadstick-kept ] || for d in /usr/lib/modules/*/; do "
+                 "[ -f $d/pkgbase ] && k=${d%/}; done; echo $k/vmlinuz)")
     pid1 = "$(readlink -f /proc/1/exe)"
     dups = {"debian": "dpkg-query -W -f='${Package}:${Architecture}\\n' | sort | uniq -d",
             "fedora": "rpm -qa --qf '%{NAME}.%{ARCH}\\n' | grep -v -e '^gpg-pubkey' -e '^kernel' | sort | uniq -d",
