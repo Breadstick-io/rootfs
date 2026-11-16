@@ -48,65 +48,82 @@ sort -r "$w/gone" | while IFS= read -r p; do
 done
 echo "taken away: $(wc -l < "$w/gone")"
 if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
-  : > "$w/dpkg-add"
-  awk -v info=/var/lib/dpkg/info -v out="$w/dpkg-add" '
-    function flush() {
-      if (f == 1 && n != "") have[n ":" a] = 1
-      if (f == 2 && n != "" && st == "install ok installed" && !((n ":" a) in have) && !((n ":all") in have)) {
-        l1 = info "/" n ".list"; l2 = info "/" n ":" a ".list"
-        if ((getline x < l1) > 0 || (getline x < l2) > 0) { printf "%s\n", buf > out; k++ }
-        close(l1); close(l2)
+  set +e
+  ( set -e
+    : > "$w/dpkg-add"
+    awk -v info=/var/lib/dpkg/info -v out="$w/dpkg-add" '
+      function flush() {
+        if (f == 1 && n != "") have[n ":" a] = 1
+        if (f == 2 && n != "" && st == "install ok installed" && !((n ":" a) in have) && !((n ":all") in have)) {
+          l1 = info "/" n ".list"; l2 = info "/" n ":" a ".list"
+          if ((getline x < l1) > 0 || (getline x < l2) > 0) { printf "%s\n", buf > out; k++ }
+          close(l1); close(l2)
+        }
+        n = ""; a = ""; st = ""; buf = ""
       }
-      n = ""; a = ""; st = ""; buf = ""
-    }
-    FNR == 1 { flush(); f++ }
-    /^$/ { flush(); next }
-    { buf = buf $0 "\n" }
-    /^Package: / { n = $2 }
-    /^Architecture: / { a = $2 }
-    /^Status: / { st = substr($0, 9) }
-    END { flush(); print k + 0 }' /var/lib/dpkg/status "$w/dpkg-status" > "$w/dpkg-n"
-  if [ -s "$w/dpkg-add" ]; then
-    { cat /var/lib/dpkg/status; [ -z "$(tail -c 1 /var/lib/dpkg/status)" ] || echo; echo; cat "$w/dpkg-add"; } > /var/lib/dpkg/status.bsl-new
-    chmod 0644 /var/lib/dpkg/status.bsl-new
-    mv -f /var/lib/dpkg/status.bsl-new /var/lib/dpkg/status
-  fi
-  echo "package database (dpkg): the VM's own packages put back: $(cat "$w/dpkg-n")"
+      FNR == 1 { flush(); f++ }
+      /^$/ { flush(); next }
+      { buf = buf $0 "\n" }
+      /^Package: / { n = $2 }
+      /^Architecture: / { a = $2 }
+      /^Status: / { st = substr($0, 9) }
+      END { flush(); print k + 0 }' /var/lib/dpkg/status "$w/dpkg-status" > "$w/dpkg-n"
+    if [ -s "$w/dpkg-add" ]; then
+      { cat /var/lib/dpkg/status; [ -z "$(tail -c 1 /var/lib/dpkg/status)" ] || echo; echo; cat "$w/dpkg-add"; } > /var/lib/dpkg/status.bsl-new
+      chmod 0644 /var/lib/dpkg/status.bsl-new
+      mv -f /var/lib/dpkg/status.bsl-new /var/lib/dpkg/status
+    fi
+    echo "package database (dpkg): the VM's own packages put back: $(cat "$w/dpkg-n")"
+  )
+  r=$?
+  set -e
+  [ "$r" = 0 ] || echo "package database (dpkg): not put back (exit $r)"
 fi
 if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
-  q='%{NAME}.%{ARCH}\n'
-  rpm -qa --qf "$q" 2>/dev/null | sort -u > "$w/rpm-have"
-  rpm --dbpath "$w/rpmdb" -qa --qf "$q" 2>/dev/null | grep -v '^gpg-pubkey[.]' | sort -u > "$w/rpm-vm"
-  : > "$w/rpm-add"
-  comm -13 "$w/rpm-have" "$w/rpm-vm" | while IFS= read -r pk; do
-    rpm --dbpath "$w/rpmdb" -q --qf '[%{FILESTATES:fstate}\t%{FILENAMES}\n]' "$pk" > "$w/rpm-files" 2>/dev/null || continue
-    fs=
-    while IFS="$(printf '\t')" read -r fs fp; do
-      [ "$fs" = normal ] || continue
-      [ -e "$fp" ] || [ -L "$fp" ] || { fs=missing; break; }
-    done < "$w/rpm-files"
-    [ "$fs" = missing ] || printf '%s\n' "$pk" >> "$w/rpm-add"
-  done
-  if [ -s "$w/rpm-add" ]; then
-    sort -u "$w/rpm-add" -o "$w/rpm-add"
-    rpm --dbpath "$w/rpmdb" -qa --qf "$q" 2>/dev/null | sort -u | comm -23 - "$w/rpm-add" > "$w/rpm-drop"
-    [ ! -s "$w/rpm-drop" ] || xargs rpm --dbpath "$w/rpmdb" -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-drop"
-    rpmdb --dbpath "$w/rpmdb" --exportdb | rpmdb --importdb
-  fi
-  echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add")"
+  set +e
+  ( set -e
+    rpm -qa --qf '%{NAME}.%{ARCH}\n' 2>/dev/null | sort -u > "$w/rpm-have"
+    rpm --dbpath "$w/rpmdb" -qa --qf '%{NAME}.%{ARCH}\t%{NAME}-%{VERSION}-%{RELEASE}%|ARCH?{.%{ARCH}}:{}|\n' 2>/dev/null | sort -u > "$w/rpm-vm"
+    : > "$w/rpm-add"
+    cut -f 1 "$w/rpm-vm" | grep -v '^gpg-pubkey[.]' | sort -u | comm -13 "$w/rpm-have" - | while IFS= read -r pk; do
+      rpm --dbpath "$w/rpmdb" -q --qf '[%{FILESTATES:fstate} f%{FILEFLAGS:fflags} %{FILENAMES}\n]' "$pk" > "$w/rpm-files" 2>/dev/null || continue
+      fs=
+      while read -r fs ff fp; do
+        [ "$fs" = normal ] || continue
+        case "$ff" in *g*|*m*) continue ;; esac
+        [ -e "$fp" ] || [ -L "$fp" ] || { fs=missing; break; }
+      done < "$w/rpm-files"
+      [ "$fs" = missing ] || printf '%s\n' "$pk" >> "$w/rpm-add"
+    done
+    if [ -s "$w/rpm-add" ]; then
+      awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next } !($1 in add) { print $2 }' "$w/rpm-add" "$w/rpm-vm" > "$w/rpm-drop"
+      [ ! -s "$w/rpm-drop" ] || xargs rpm --dbpath "$w/rpmdb" -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-drop" 2>>/var/log/breadstick-vm-restore.log
+      rpmdb --dbpath "$w/rpmdb" --exportdb | rpmdb --importdb
+    fi
+    echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add")"
+  )
+  r=$?
+  set -e
+  [ "$r" = 0 ] || echo "package database (rpm): not put back (exit $r)"
 fi
 if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
-  for e in "$s"/var/lib/pacman/local/*/desc; do
-    [ -f "$e" ] && awk '/^%NAME%$/ { getline; print; exit }' "$e"
-  done | sort -u > "$w/pac-have"
-  k=0
-  for d in /var/lib/pacman/local/*/; do
-    d=${d%/}
-    [ -f "$d/desc" ] && [ ! -e "$s$d" ] || continue
-    pn=$(awk '/^%NAME%$/ { getline; print; exit }' "$d/desc")
-    if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else k=$((k + 1)); fi
-  done
-  echo "package database (pacman): the VM's own packages kept: $k"
+  set +e
+  ( set -e
+    for e in "$s"/var/lib/pacman/local/*/desc; do
+      [ ! -f "$e" ] || awk '/^%NAME%$/ { getline; print; exit }' "$e"
+    done | sort -u > "$w/pac-have"
+    k=0
+    for d in /var/lib/pacman/local/*/; do
+      d=${d%/}
+      [ -f "$d/desc" ] && [ ! -e "$s$d" ] || continue
+      pn=$(awk '/^%NAME%$/ { getline; print; exit }' "$d/desc")
+      if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else k=$((k + 1)); fi
+    done
+    echo "package database (pacman): the VM's own packages kept: $k"
+  )
+  r=$?
+  set -e
+  [ "$r" = 0 ] || echo "package database (pacman): not checked (exit $r)"
 fi
 rm -rf "$s" "$w"
 sync

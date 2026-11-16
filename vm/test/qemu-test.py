@@ -985,17 +985,24 @@ def tabs_test():
         return
     sock = "/tmp/.breadstick-tmux-1000-q1"
     t1 = Chan(cmd, user="tester", env=["BREADSTICK_TERMINAL=1", "TERM=xterm-256color"], pty=True)
-    time.sleep(3)
+    # Polled, not slept (round 10: a fixed 3 s lost the typed line under TCG, before tmux's client was attached and
+    # the pane's shell was reading): the session attached and its shell at a prompt, then the line, then its file.
+    run(f"n=0; until [ \"$(tmux -S {sock} list-sessions -F '#{{session_attached}}' 2>/dev/null)\" = 1 ] && "
+        f"[ \"$(tmux -S {sock} list-panes -F '#{{pane_current_command}}' 2>/dev/null)\" = bash ] || [ $n -ge 120 ]; do sleep 0.5; n=$((n+1)); done; sleep 2",
+        user="tester")
     t1.send(b"echo r9-pane-$$ > /tmp/r9-pane; sleep 600\r")
-    time.sleep(2)
+    run("n=0; until [ -s /tmp/r9-pane ] || [ $n -ge 120 ]; do sleep 0.5; n=$((n+1)); done", user="tester")
+    time.sleep(1)
     t1.close()
-    time.sleep(3)
+    run(f"n=0; until [ \"$(tmux -S {sock} list-sessions -F '#{{session_attached}}' 2>/dev/null)\" = 0 ] || [ $n -ge 60 ]; do sleep 0.5; n=$((n+1)); done",
+        user="tester")
     o, st = run(f"cat /tmp/r9-pane; tmux -S {sock} list-sessions -F '#{{session_name}} #{{session_attached}}'; "
                 f"tmux -S {sock} list-panes -F '#{{pane_current_command}}'", user="tester")
     check("tabs (V9): the tab's shell keeps running after the tab closed (tmux)", "r9-pane-" in o and "main 0" in o and "sleep" in o,
           o.strip().replace("\n", " | "))
     t2 = Chan(cmd, user="tester", env=["BREADSTICK_TERMINAL=1", "TERM=xterm-256color"], pty=True)
-    time.sleep(3)
+    run(f"n=0; until [ \"$(tmux -S {sock} list-sessions -F '#{{session_attached}}' 2>/dev/null)\" = 1 ] || [ $n -ge 120 ]; do sleep 0.5; n=$((n+1)); done",
+        user="tester")
     o, st = run(f"tmux -S {sock} list-sessions -F '#{{session_name}} #{{session_attached}}' | sort | tr '\\n' ' '; "
                 f"tmux -S {sock} list-panes -a -F '#{{pane_current_command}}' | tr '\\n' ' '", user="tester")
     check("tabs (V9): the next start of the tab reattaches to the same session", o.split()[:2] == ["main", "1"] and o.count("main") == 1
