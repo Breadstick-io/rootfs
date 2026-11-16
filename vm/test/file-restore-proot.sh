@@ -7,6 +7,7 @@ export LC_ALL
 nl='
 '
 rm -rf "$w"
+rm -f /var/lib/breadstick-vm/restore-left-out
 mkdir -p "$w"
 chmod 0700 "$w"
 find / -xdev -name "*$nl*" -prune -o \( -path /var/lib/breadstick-vm -o -path /home -o -path /tmp -o -path /var/tmp \) -prune -o ! -type d \( ! -uid 0 -o ! -gid 0 \) -printf '%u:%g\t%p\n' > "$w/owners"
@@ -74,7 +75,8 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
         -o Dir::Cache::srcpkgcache= -o Debug::NoLocking=1 > "$2" 2>&1
     }
     o=0
-    bsl_out() { awk '/^Package: / { print "left out (dpkg): " $2 }' "$1" >>/var/log/breadstick-vm-restore.log; }
+    bsl_out() { awk '/^Package: / { print $2 }' "$1" | bsl_left; }
+    bsl_left() { tee -a "$w/left-dpkg" | sed 's/^/left out (dpkg): /' >>/var/log/breadstick-vm-restore.log; }
     if [ -s "$w/dpkg-add" ] && ! command -v apt-get >/dev/null 2>&1; then
       o=$(bsl_count "$w/dpkg-add")
       bsl_out "$w/dpkg-add"
@@ -121,7 +123,7 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
         { n = ""; c = split($0, L, "\n"); for (j = 1; j <= c; j++) if (L[j] ~ /^Package: /) n = substr(L[j], 10); if (!(n in b)) print }' \
         "$w/dpkg-add" > "$w/dpkg-add.1"
       o=$((o + $(bsl_count "$w/dpkg-add") - $(bsl_count "$w/dpkg-add.1")))
-      sed 's/^/left out (dpkg): /' "$w/dpkg-bad" >>/var/log/breadstick-vm-restore.log
+      bsl_left < "$w/dpkg-bad"
       mv -f "$w/dpkg-add.1" "$w/dpkg-add"
     done
     if [ -s "$w/dpkg-add" ]; then
@@ -129,6 +131,7 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
       chmod 0644 /var/lib/dpkg/status.bsl-new
       mv -f /var/lib/dpkg/status.bsl-new /var/lib/dpkg/status
     fi
+    [ ! -s "$w/left-dpkg" ] || sort -u "$w/left-dpkg" | sed 's/^/dpkg /' >> /var/lib/breadstick-vm/restore-left-out
     echo "package database (dpkg): the VM's own packages put back: $(bsl_count "$w/dpkg-add"), left out: $o"
   )
   r=$?
@@ -158,25 +161,48 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
       [ ! -s "$w/rpm-drop" ] || xargs rpm --dbpath "$w/rpmdb" -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-drop" 2>>/var/log/breadstick-vm-restore.log
       rpmdb --dbpath "$w/rpmdb" --exportdb | rpmdb --importdb
       i=0
+      : > "$w/rpm-apart"
       while [ -s "$w/rpm-add" ]; do
         if rpm -Va --nofiles --nodigest --nosignature --noscripts > "$w/rpm-v" 2>&1; then break; fi
-        grep -vxF -f "$w/rpm-v0" "$w/rpm-v" > "$w/rpm-v1" || true
-        [ -s "$w/rpm-v1" ] || break
+        # A versioned need whose capability the system has (at another version) is a version apart, not a
+        # missing package: the VM's systemd pins systemd-libs = its own version, the backup's is newer.
+        awk '/^\t.* [<>=]+ [^ ]+ is needed by / { c = substr($0, 2); sub(/ [<>=]+ [^ ]+ is needed by .*$/, "", c); print c }' \
+          "$w/rpm-v" | sort -u > "$w/rpm-vcaps"
+        : > "$w/rpm-caps"
+        while IFS= read -r c; do
+          if rpm -q --whatprovides "$c" >/dev/null 2>&1; then printf '%s\n' "$c" >> "$w/rpm-caps"; fi
+        done < "$w/rpm-vcaps"
         awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next }
           FILENAME == ARGV[2] { if ($1 in add) key[$2] = $1; next }
-          /^Unsatisfied dependencies for .*:$/ { x = substr($0, 30, length($0) - 30); sub(/-[0-9]+:/, "-", x); if (x in key) print key[x] }' \
-          "$w/rpm-add" "$w/rpm-vm" "$w/rpm-v1" | sort -u > "$w/rpm-bad"
+          FILENAME == ARGV[3] { cap[$0] = 1; next }
+          FILENAME == ARGV[4] { if ($0 ~ /^Unsatisfied dependencies for .*:$/) h = $0; else old[h "\n" $0] = 1; next }
+          /^Unsatisfied dependencies for .*:$/ { h = $0; x = substr($0, 30, length($0) - 30); sub(/-[0-9]+:/, "-", x); k = (x in key) ? key[x] : ""; next }
+          ((h "\n" $0) in old) { next }
+          {
+            c = substr($0, 2); v = c
+            if (k != "" && sub(/ [<>=]+ [^ ]+ is needed by .*$/, "", c) && (c in cap)) { print "apart\t" k "\t" substr(v, 1, index(v, " is needed by ") - 1); next }
+            print (k != "" ? "bad\t" k : "other")
+          }' "$w/rpm-add" "$w/rpm-vm" "$w/rpm-caps" "$w/rpm-v0" "$w/rpm-v" > "$w/rpm-why"
+        awk -F '\t' '$1 == "bad" { print $2 }' "$w/rpm-why" | sort -u > "$w/rpm-bad"
         i=$((i + 1))
-        if [ ! -s "$w/rpm-bad" ] || [ "$i" -gt 50 ]; then cp "$w/rpm-add" "$w/rpm-bad"; fi
+        if [ ! -s "$w/rpm-bad" ]; then
+          if ! grep -q '^other' "$w/rpm-why"; then grep '^apart' "$w/rpm-why" | sort -u > "$w/rpm-apart" || true; break; fi
+          cp "$w/rpm-add" "$w/rpm-bad"
+        elif [ "$i" -gt 50 ]; then cp "$w/rpm-add" "$w/rpm-bad"; fi
         awk -F '\t' 'FILENAME == ARGV[1] { b[$0] = 1; next } ($1 in b) { print $2 }' "$w/rpm-bad" "$w/rpm-vm" \
           | xargs rpm -e --justdb --nodeps --noscripts --notriggers --allmatches 2>>/var/log/breadstick-vm-restore.log
         grep -vxF -f "$w/rpm-bad" "$w/rpm-add" > "$w/rpm-add.1" || true
-        sed 's/^/left out (rpm): /' "$w/rpm-bad" >>/var/log/breadstick-vm-restore.log
+        tee -a "$w/left-rpm" < "$w/rpm-bad" | sed 's/^/left out (rpm): /' >>/var/log/breadstick-vm-restore.log
         o=$((o + $(wc -l < "$w/rpm-bad")))
         mv -f "$w/rpm-add.1" "$w/rpm-add"
       done
     fi
+    [ ! -s "$w/left-rpm" ] || sort -u "$w/left-rpm" | sed 's/^/rpm /' >> /var/lib/breadstick-vm/restore-left-out
     echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add"), left out: $o"
+    if [ -s "$w/rpm-apart" ]; then
+      cut -f 2,3 "$w/rpm-apart" | sed 's/\t/ needs /; s/^/a version apart (rpm): /' >>/var/log/breadstick-vm-restore.log
+      echo "package database (rpm): a version apart from the system's (the next full upgrade levels them): $(cut -f 2 "$w/rpm-apart" | sort -u | wc -l)"
+    fi
   )
   r=$?
   set -e
@@ -196,6 +222,7 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
       if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else printf '%s\t%s\n' "$pn" "$d" >> "$w/pac-kept"; fi
     done
     o=0
+    : > "$w/pac-apart"
     if [ -s "$w/pac-kept" ]; then
       mkdir -p "$w/pacdb0" "$w/pac-out"
       cp -a /var/lib/pacman/local "$w/pacdb0/local"
@@ -206,13 +233,31 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
         if pacman -Dk > "$w/pac-c" 2>&1; then break; fi
         grep -vxF -f "$w/pac-c0" "$w/pac-c" > "$w/pac-c1" || true
         [ -s "$w/pac-c1" ] || break
-        awk -F '\t' 'FILENAME == ARGV[1] { kept[$1] = $0; next }
-          { split($0, q, "\047") }
-          / dependency for \047/ { if (q[4] in kept) bad[q[4]] = 1 }
-          / conflicts with \047/ { if (q[2] in kept) bad[q[2]] = 1; if (q[4] in kept) bad[q[4]] = 1 }
-          END { for (b in bad) print kept[b] }' "$w/pac-kept" "$w/pac-c1" > "$w/pac-bad"
+        # A versioned dependency whose name the system has (at another version) is a version apart, which pacman
+        # itself leaves alone (an already broken dependency is ignored) and -Syu levels; never a reason to leave out.
+        awk -F "\047" '/ dependency for \047/ { d = $2; if (sub(/[<>=].*$/, "", d)) print d }' "$w/pac-c1" | sort -u > "$w/pac-vdeps"
+        : > "$w/pac-sat"
+        while IFS= read -r d; do
+          if pacman -T "$d" >/dev/null 2>&1; then printf '%s\n' "$d" >> "$w/pac-sat"; fi
+        done < "$w/pac-vdeps"
+        awk -F '\t' 'FILENAME == ARGV[1] { kept[$1] = 1; next }
+          FILENAME == ARGV[2] { sat[$0] = 1; next }
+          { split($0, q, "\047"); d = q[2] }
+          / dependency for \047/ {
+            if (!(q[4] in kept)) print "other"
+            else if (sub(/[<>=].*$/, "", d) && (d in sat)) print "apart\t" q[4] "\t" q[2]
+            else print "bad\t" q[4]
+            next
+          }
+          / conflicts with \047/ { m = 0; if (q[2] in kept) { print "bad\t" q[2]; m = 1 } if (q[4] in kept) { print "bad\t" q[4]; m = 1 } if (!m) print "other"; next }
+          { print "other" }' "$w/pac-kept" "$w/pac-sat" "$w/pac-c1" > "$w/pac-why"
+        awk -F '\t' 'FILENAME == ARGV[1] { kept[$1] = $0; next } $1 == "bad" { b[$2] = 1 } END { for (x in b) print kept[x] }' \
+          "$w/pac-kept" "$w/pac-why" > "$w/pac-bad"
         i=$((i + 1))
-        if [ ! -s "$w/pac-bad" ] || [ "$i" -gt 50 ]; then cp "$w/pac-kept" "$w/pac-bad"; fi
+        if [ ! -s "$w/pac-bad" ]; then
+          if ! grep -q '^other' "$w/pac-why"; then grep '^apart' "$w/pac-why" | sort -u > "$w/pac-apart" || true; break; fi
+          cp "$w/pac-kept" "$w/pac-bad"
+        elif [ "$i" -gt 50 ]; then cp "$w/pac-kept" "$w/pac-bad"; fi
         cut -f 2 "$w/pac-bad" | while IFS= read -r d; do mv "$d" "$w/pac-out/"; done
         cut -f 1 "$w/pac-bad" | sed 's/^/left out (pacman): /' >>/var/log/breadstick-vm-restore.log
         awk -F '\t' 'FILENAME == ARGV[1] { b[$1] = 1; next } !($1 in b)' "$w/pac-bad" "$w/pac-kept" > "$w/pac-kept.1"
@@ -221,6 +266,10 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
       done
     fi
     echo "package database (pacman): the VM's own packages kept: $(wc -l < "$w/pac-kept"), left out: $o"
+    if [ -s "$w/pac-apart" ]; then
+      cut -f 2,3 "$w/pac-apart" | sed 's/\t/ needs /; s/^/a version apart (pacman): /' >>/var/log/breadstick-vm-restore.log
+      echo "package database (pacman): a version apart from the system's (the next full upgrade levels them): $(cut -f 2 "$w/pac-apart" | sort -u | wc -l)"
+    fi
   )
   r=$?
   set -e

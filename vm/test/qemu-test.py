@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runs inside bsl-vmtest:1 (see qemu-test.sh): boots /w/{vmlinuz,initrd.img,root.img} and tests it."""
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -1394,15 +1395,51 @@ def proot_restore_test():
     dups = {"debian": "dpkg-query -W -f='${Package}:${Architecture}\\n' | sort | uniq -d",
             "fedora": "rpm -qa --qf '%{NAME}.%{ARCH}\\n' | grep -v -e '^gpg-pubkey' -e '^kernel' | sort | uniq -d",
             "archlinux": "pacman -Qq | sort | uniq -d"}[DISTRO]
+    # Round 10, third review: rpm and pacman keep a VM package whose only unmet need is a version of something the
+    # system has (the VM's systemd pinning the image's systemd-libs); the check is clean but for exactly the needs the
+    # restore's log lists as `a version apart`, each of which a package the system has provides.
     audit = {"debian": "dpkg --audit && apt-get -qq check",
-             "fedora": "rpm -q --whatprovides /usr/bin/bash >/dev/null && rpm -Va --nofiles --nodigest --nosignature --noscripts",
-             "archlinux": "pacman -Dk >/dev/null"}[DISTRO]
-    o, st = run(f"{owns} {kfile} >/dev/null 2>&1 && echo kernel-owned; p={pid1}; {owns} \"$p\" >/dev/null 2>&1 || "
-                f"{owns} \"${{p#/usr}}\" >/dev/null 2>&1 && echo systemd-owned; echo dups=$({dups} | wc -l); "
-                f"o=$({audit} 2>&1); r=$?; echo audit=$r $(printf '%s' \"$o\" | wc -l)")
-    check("proot restore: the package database names the VM's own kernel and systemd, nothing twice, its check clean",
-          "kernel-owned" in o and "systemd-owned" in o and "dups=0" in o and "audit=0 0" in o,
-          o.strip().replace("\n", " | ") + f" (restore: {said})")
+             "fedora": r"""rpm -q --whatprovides /usr/bin/bash >/dev/null || echo 'nothing provides /usr/bin/bash'
+rpm -Va --nofiles --nodigest --nosignature --noscripts > /tmp/bsl-va 2>&1
+sed -n 's/^a version apart (rpm): [^ ]* needs //p' /var/log/breadstick-vm-restore.log | sort -u > /tmp/bsl-apart
+grep -v '^Unsatisfied dependencies for ' /tmp/bsl-va | sed 's/^\t//; s/ is needed by .*$//' | sort -u | grep -vxF -f /tmp/bsl-apart
+while read -r c; do rpm -q --whatprovides "${c%% [<>=]*}" >/dev/null 2>&1 || echo "no provider: $c"; done < /tmp/bsl-apart
+true""",
+             "archlinux": r"""pacman -Dk > /tmp/bsl-dk 2>&1
+sed -n "s/^a version apart (pacman): \([^ ]*\) needs \(.*\)$/error: missing '\2' dependency for '\1'/p" /var/log/breadstick-vm-restore.log | sort -u > /tmp/bsl-apart
+grep -v -e '^warning: database file' -e '^No database errors' /tmp/bsl-dk | grep -vxF -f /tmp/bsl-apart
+sed -n 's/^a version apart (pacman): [^ ]* needs //p' /var/log/breadstick-vm-restore.log | while read -r d; do
+  pacman -T "${d%%[<>=]*}" >/dev/null 2>&1 || echo "no provider: $d"; done
+true"""}[DISTRO]
+    apart, _ = run("grep -c '^a version apart (' /var/log/breadstick-vm-restore.log 2>/dev/null || true")
+    rec, _ = run("cat /var/lib/breadstick-vm/restore-left-out 2>/dev/null | tr '\\n' ' '")
+    print(f"proot restore: a version apart: {apart.strip() or '0'}; left out for the refresh: {rec.strip() or 'none'}", flush=True)
+    # Every package dpkg or rpm left out, and only those, is recorded for the VM's refresh (VmGuestUpdate.reinstallScript).
+    want_rec = sorted(f"{fam} {name}" for fam, name in re.findall(r"left out \((dpkg|rpm)\): (\S+)", left))
+    got_rec = sorted(" ".join(p) for p in zip(rec.split()[0::2], rec.split()[1::2]))
+    check("proot restore: what was left out is recorded for the refresh (round 10, third review)", got_rec == want_rec,
+          f"record: {rec.strip()!r}; log: {left.strip()!r}")
+
+    def db_check(what):
+        o, st = run(f"{owns} {kfile} >/dev/null 2>&1 && echo kernel-owned; p={pid1}; {owns} \"$p\" >/dev/null 2>&1 || "
+                    f"{owns} \"${{p#/usr}}\" >/dev/null 2>&1 && echo systemd-owned; echo dups=$({dups} | wc -l); "
+                    f"o=$({audit}\n) 2>&1; r=$?; echo audit=$r $(printf '%s' \"$o\" | grep -c .)")
+        check(f"proot restore: the package database names the VM's own kernel and systemd, nothing twice, its check clean{what}",
+              "kernel-owned" in o and "systemd-owned" in o and "dups=0" in o and "audit=0 0" in o,
+              o.strip().replace("\n", " | ") + f" (restore: {said})")
+
+    if rec.strip() and DISTRO in ("debian", "fedora") and os.environ.get("REINSTALL", "1") == "1":
+        # The VM's refresh installs them again from the mirrors (network), after its own index refresh (Debian's
+        # apt-get update; dnf refreshes by itself); its copy is rootfs vm/test/reinstall-<family>.sh.
+        if DISTRO == "debian":
+            run("apt-get update -q >/dev/null 2>&1", user="root")
+        o, st = run(open(f"/t/reinstall-{DISTRO}.sh").read(), user="root")
+        gone, _ = run("test -e /var/lib/breadstick-vm/restore-left-out || echo gone")
+        check("proot restore: the refresh installs what was left out again, and the record goes", st == 0 and "gone" in gone,
+              f"exit {st}: {' | '.join(o.strip().splitlines()[-6:])}")
+        db_check(" (after the refresh's reinstall)")
+    else:
+        db_check("")
     if DISTRO == "debian":
         # Round 10 review: a backup with breadstick-systemd (the Standard engine's service manager) comes in without it:
         # no package, no diversion of the VM's systemctl and the rest, no .distrib left, and real systemd answers.

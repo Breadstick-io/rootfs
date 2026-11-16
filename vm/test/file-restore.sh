@@ -7,6 +7,7 @@ export LC_ALL
 nl='
 '
 rm -rf "$w"
+rm -f /var/lib/breadstick-vm/restore-left-out
 mkdir -p "$w"
 chmod 0700 "$w"
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
