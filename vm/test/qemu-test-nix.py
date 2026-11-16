@@ -108,6 +108,14 @@ o, st = run("hello", user="tester")
 check("hello as the user after the apply", o.strip() == "Hello, world!", o.strip()[-200:])
 o, st = run(f"{B} rollback 2>&1 | tail -2; command -v hello || echo gone")
 check("roll back in the VM", st == 0 and "rolled back to generation 1" in o and "gone" in o, o.strip().replace("\n", " | ")[-300:])
+# Generation 1 is the image's own, made before the account: the account stays (round 10, F7; the Pixel's proot
+# rollback removed it), and so does sudo for it.
+o, st = run("id -un; sudo -n true && echo sudo-ok", user="tester")
+check("the account and its sudo after the rollback to generation 1", st == 0 and "tester" in o and "sudo-ok" in o,
+      o.strip().replace("\n", " | "))
+o, st = run(f"{B} generations --json")
+check("every generation keeps the account (generations --json)", st == 0 and '"keepsAccount": false' not in o and "keepsAccount" in o,
+      o.strip()[-200:])
 o, st = run("readlink /nix/var/nix/gcroots/breadstick-nixpkgs; readlink -f /etc/breadstick/nix/nixpkgs; "
             "for r in /nix/var/nix/gcroots/auto/*; do [ -L \"$r\" ] && [ ! -e \"$r\" ] && echo dangling; done; true")
 lines = o.split()
