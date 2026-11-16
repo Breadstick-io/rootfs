@@ -118,6 +118,9 @@ in
       export LIBGL_KOPPER_DISABLE=1
       export MESA_VK_WSI_DEBUG=noshm
     '';
+    # files/terminal.sh (V9: a Terminal tab gets the agent's runtime dir and bus back after Stop), after the Breadstick
+    # module's breadstick-terminal.sh in /etc/bashrc, whose hook it wraps.
+    environment.interactiveShellInit = lib.mkAfter (builtins.readFile ../files/terminal.sh);
 
     # The kernel and initrd come from the app (crosvm boots them directly, no bootloader), and NixOS's stage 1 needs
     # init= on the kernel line. The image's own pair boots with `init=/nix/var/nix/profiles/system/init` in its

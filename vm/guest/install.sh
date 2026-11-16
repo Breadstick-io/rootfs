@@ -10,7 +10,8 @@
 #   /usr/lib/breadstick-vm/{bsl-vmagent,bsl-vmnet,bsl-x11-relay,vmnet-setup,vmnet.nft}
 #   /etc/systemd/system/{bsl-vmagent,bsl-vmnet,bsl-vmnet-setup,bsl-x11-relay}.service, enabled
 #   /etc/fstab, /etc/modules-load.d/breadstick-vm.conf, /etc/systemd/journald.conf.d/breadstick-vm.conf,
-#   /etc/systemd/zram-generator.conf, /etc/profile.d/breadstick-vm.sh
+#   /etc/systemd/zram-generator.conf, /etc/profile.d/breadstick-vm.sh (files/profile.sh, then files/terminal.sh: a
+#   Terminal tab gets the agent's runtime dir and bus back after Stop, V9)
 #   /etc/sudoers.d/breadstick-vm: NOPASSWD for the administrators' group the system has, sudo (Debian) or wheel
 #   (Fedora, Arch); none when it has neither or no /etc/sudoers.d (no sudo installed).
 # Units are enabled with the target's own systemctl (chroot when ROOT is not /), so their WantedBy links are the
@@ -39,7 +40,8 @@ install -m 0644 "$F/fstab" "$ROOT/etc/fstab"
 install -m 0644 "$F/modules.conf" "$ROOT/etc/modules-load.d/breadstick-vm.conf"
 install -m 0644 "$F/journald.conf" "$ROOT/etc/systemd/journald.conf.d/breadstick-vm.conf"
 install -m 0644 "$F/zram-generator.conf" "$ROOT/etc/systemd/zram-generator.conf"
-install -m 0644 "$F/profile.sh" "$ROOT/etc/profile.d/breadstick-vm.sh"
+cat "$F/profile.sh" "$F/terminal.sh" > "$ROOT/etc/profile.d/breadstick-vm.sh"
+chmod 0644 "$ROOT/etc/profile.d/breadstick-vm.sh"
 
 # The administrators' group: the first of sudo and wheel that the system's own /etc/group has.
 admin=

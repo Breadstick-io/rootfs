@@ -141,7 +141,10 @@ A tab is the user's tmux on a socket of the tab's own (`/tmp/.breadstick-tmux-<u
 reattaches after the tab or the app closed, with a seed that hands the agent's `XDG_RUNTIME_DIR` and
 `DBUS_SESSION_BUS_ADDRESS` over to breadstick-terminal.sh: while a desktop session runs, the app writes
 `/run/bsl/session` in the VM (`f` op) and the tab takes the session's display, bus and sound at each prompt, and gets
-the agent's back after Stop. `test/tab-command.sh` is a copy of the app's command for tab "q1".
+the agent's back after Stop. Giving them back is the VM's own wrapper of breadstick-terminal.sh's hook
+(`guest/files/terminal.sh`, after `profile.sh` in `/etc/profile.d/breadstick-vm.sh`; on NixOS in `/etc/bashrc` after
+the Breadstick module's), so Debian's breadstick-terminal.sh stays as 3.x ships it; `test/terminal-agent.sh` checks it
+step by step against round 9's in-package version. `test/tab-command.sh` is a copy of the app's command for tab "q1".
 
 ## File-level backups (agent runs, plan 5.14 V20)
 
