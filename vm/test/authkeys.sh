@@ -1,0 +1,1 @@
+set -e; u='tester'; h=$(getent passwd "$u" | cut -d: -f6); [ -n "$h" ]; mkdir -p "$h/.ssh"; chmod 700 "$h/.ssh"; cat > "$h/.ssh/authorized_keys.tmp"; chmod 600 "$h/.ssh/authorized_keys.tmp"; mv -f "$h/.ssh/authorized_keys.tmp" "$h/.ssh/authorized_keys"; chown -R "$u": "$h/.ssh"; echo OK

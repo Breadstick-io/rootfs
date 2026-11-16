@@ -144,6 +144,29 @@ streams the backup's files into `test/file-unpack-vm.sh` (a VM's backup: owners 
 `/var/lib/breadstick-vm/restore`; only a whole backup is then laid over the system by `test/file-restore.sh`, which
 leaves the image's VM guest in place, and the app restarts the VM.
 
+## Ways in: Breadstick Settings, bsl-mcp, SSH (agent runs, plan 5.14 V13, V18)
+
+Only the host opens channels, so each way into the VM is a channel the app opens, and none needs a new guest program
+(an image published before 4.0 takes them as it is). Android `vm/VmInbound.kt`, `vm/VmSocketRelay.kt`,
+`vm/VmPortForward.kt`; the commands are `VmCommands`', copied here and checked by Android's VmInboundTest.
+
+- **/run/bsl/settings.sock** (Breadstick Settings in Linux): at the boot the app runs `test/settings-relay.sh` as root:
+  the image's bsl-x11-relay on vsock **6100**, listening at `/run/breadstick-vm/relay/settings.sock` (the relay makes
+  its socket's folder 1777, which /run/bsl must not be), with /run/bsl/settings.sock a link to it. The app keeps two
+  idle channels to 6100 and serves each paired one as a connection to its settings socket (same protocol, same rules).
+  The link and the relay go when the app hangs the command up.
+- **bsl-mcp**: `/run/bsl/mcp` (port, key) written by `test/mcp-file.sh` from stdin, 0600 and the Linux user's, while the
+  app's MCP server runs; `test/host-ports.sh` gives the table `ip breadstick_vm_host`, which sends the VM's own
+  127.0.0.1:<that port> to bsl-vmnet (as vmnet.nft does for bsl0), and VmNetRelay connects it to the app's 127.0.0.1.
+- **SSH on 2222**: the app's own setup (`test/ssh-setup-<distro>.sh`, the proot script with the distribution's sshd
+  units left off), `test/sshd-start.sh` held by the app (sshd makes a session of its own even with -D, so the shell
+  around it ends it and its sessions on the hangup), `test/authkeys.sh` for ~/.ssh/authorized_keys. The app listens on
+  2222 on Android and runs `test/port-forward.sh` (bash's /dev/tcp to 127.0.0.1:2222, stderr nowhere, exit 7 when
+  nothing listens) for each connection: its stdin and output are the connection.
+
+qemu-test.py's "parity: ..." checks run all three against the image (PARITY=0 skips them); AutoBuild
+`test/parity/parity-gate.py` reads them per distribution.
+
 ## Testing without a device
 
 ```

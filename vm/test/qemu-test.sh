@@ -12,6 +12,7 @@
 #   PROOT_IMAGE=<proot image .tar.zst> vm/test/qemu-test.sh ...   # also restore a proot system into the VM, last
 #                                                                  # (its own files from file-backup.sh's round trip too)
 #   CID=78 vm/test/qemu-test.sh ...                # the guest's vsock CID (default 77): one per test running at once
+#   PARITY=0 vm/test/qemu-test.sh ...              # skip the ways in (settings.sock, bsl-mcp, SSH: plan 5.14 V13, V18)
 # arm64 runs under KVM on an arm64 host; amd64 under TCG (slow). Needs the bsl-vmtest:3 image
 # (Debian 13 + qemu-system-arm/x86 + python3; Dockerfile beside this script).
 set -eu
@@ -59,5 +60,5 @@ if [ -n "${STAGED_REPO:-}" ]; then
   [ -s "$STAGED_REPO/dists/${STAGED_SUITE:-breadstick}/InRelease" ] || { echo "STAGED_REPO $STAGED_REPO has no dists/${STAGED_SUITE:-breadstick}/InRelease" >&2; exit 2; }
   R="-v $(cd "$STAGED_REPO" && pwd):/repo:ro -e STAGED_SUITE=${STAGED_SUITE:-breadstick}"
 fi
-docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $AGENT_ENV -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
+docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $AGENT_ENV -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:3 python3 /t/qemu-test.py

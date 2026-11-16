@@ -632,6 +632,266 @@ if os.path.exists("/usr/bin/Xvfb"):
 files_test()
 
 
+# ----------------------------------------------------------------------------- ways in (plan 5.14 V13, V18)
+# Each check below is named "parity: ..." for AutoBuild test/parity-gate.py, which reads them per distribution. Every
+# command the VM runs here is the app's own text (rootfs vm/test/*.sh, which Android's VmInboundTest checks are copies).
+
+def hangup(ch):
+    """What the app's closing of a channel is to the agent: shut down first, since Linux keeps a socket open under the
+    reader thread's blocked recv() (as files_test does)."""
+    import socket as so
+    try:
+        ch.s.shutdown(so.SHUT_RDWR)
+    except OSError:
+        pass
+    ch.close()
+
+
+def relay_pool(port, target, size=2):
+    """The app's VmSocketRelay: [size] idle channels to [port]; a channel's first bytes pair it with a new connection
+    to the unix socket [target] here."""
+    import socket as so
+    idle = [0]
+    lock = threading.Lock()
+    stop = [False]
+
+    def chan(c):
+        try:
+            first = c.recv(65536)
+        except OSError:
+            first = b""
+        with lock:
+            idle[0] -= 1
+        if not first:
+            c.close()
+            return
+        x = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        x.connect(target)
+        x.sendall(first)
+        threading.Thread(target=lambda: (bslvm.splice(x, c), c.close()), daemon=True).start()
+        bslvm.splice(c, x)
+        try:
+            x.shutdown(so.SHUT_WR)
+        except OSError:
+            pass
+
+    def loop():
+        while not stop[0]:
+            with lock:
+                n = idle[0]
+            if n < size:
+                try:
+                    c = bslvm.connect(args, port)
+                except OSError:
+                    time.sleep(0.3)
+                    continue
+                with lock:
+                    idle[0] += 1
+                threading.Thread(target=chan, args=(c,), daemon=True).start()
+            else:
+                time.sleep(0.05)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
+
+
+def settings_relay_test():
+    """Breadstick Settings in Linux (V13): /run/bsl/settings.sock in the VM reaches the app's settings server."""
+    import socket as so
+    path = "/tmp/bsl-fake-settings.sock"
+    if os.path.exists(path):
+        os.remove(path)
+    srv = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(4)
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            f = c.makefile("rwb")
+            for line in f:
+                f.write(b'{"v":1,"ok":true,"echo":' + json.dumps(line.decode().strip()).encode() + b'}\n')
+                f.flush()
+            c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    stop = relay_pool(6100, path)
+    o, _ = run("stat -c %a /run/bsl")
+    bsl_mode = o.strip()
+    relay = Chan(open("/t/settings-relay.sh").read())
+    o, st = run("n=0; while [ ! -S /run/bsl/settings.sock ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done; "
+                "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"/run/bsl/settings.sock\"); "
+                "s.sendall(b\"{\\\"v\\\":1,\\\"op\\\":\\\"hello\\\"}\\n\"); print(s.makefile().readline().strip())'", user="tester")
+    check("parity: settings.sock reaches the app (V13)", st == 0 and '"echo":"{\\"v\\":1,\\"op\\":\\"hello\\"}"' in o, o.strip()[-300:])
+    o2, _ = run("stat -c %a /run/bsl; stat -c %a /run/breadstick-vm/relay; readlink /run/bsl/settings.sock")
+    w = o2.split()
+    check("parity: the relay keeps /run/bsl as it was, its own folder 1777", len(w) == 3 and w[0] == bsl_mode and w[1] == "1777"
+          and w[2] == "/run/breadstick-vm/relay/settings.sock", f"before {bsl_mode} | " + o2.strip().replace("\n", " | "))
+    hangup(relay)
+    time.sleep(2.5)
+    o, _ = run("[ -e /run/bsl/settings.sock ] || [ -L /run/bsl/settings.sock ] && echo left || echo gone; pgrep -f 'bsl-x11-relay 610[0]' || true")
+    check("parity: the settings relay goes with its channel", o.split()[:1] == ["gone"] and len(o.split()) == 1, o.strip().replace("\n", " | "))
+    stop[0] = True
+    srv.close()
+
+
+def mcp_test():
+    """bsl-mcp in the VM (V13): /run/bsl/mcp and the loopback port that leads to the app's MCP server."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    seen = {}
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            seen["auth"] = self.headers.get("Authorization")
+            seen["body"] = body
+            ans = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                                     "serverInfo": {"name": "fake-breadstick", "version": "1"}}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(ans)))
+            self.end_headers()
+            self.wfile.write(ans)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 18765), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    o, st = run(open("/t/host-ports.sh").read())
+    check("parity: host ports table (V13)", st == 0, o.strip())
+    o, st = run(open("/t/mcp-file.sh").read(), stdin=b"18765\nk3y-r10\n")
+    o2, _ = run("stat -c '%a %U' /run/bsl/mcp")
+    check("parity: /run/bsl/mcp is the user's, 0600 (V13)", st == 0 and o2.strip() == "600 tester", (o + o2).strip())
+    init = b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qemu","version":"1"}}}\n'
+    o, st = run("command -v bsl-mcp >/dev/null || exit 77; timeout 20 bsl-mcp", user="tester", stdin=init)
+    if st == 77:
+        # No breadstick-tools in this image (a base image): the same route with curl, as bsl-mcp connects.
+        o, st = run("curl -sS -m 10 -H 'Authorization: Bearer k3y-r10' -d '{}' http://127.0.0.1:18765/mcp", user="tester")
+    check("parity: bsl-mcp reaches the app's MCP server (V13)", "fake-breadstick" in o and seen.get("auth") == "Bearer k3y-r10",
+          f"status {st} auth {seen.get('auth')!r}: {o.strip()[-200:]}")
+    # The route is ours: without the table nothing answers there.
+    run("nft delete table ip breadstick_vm_host")
+    o, st = run("curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:18765/mcp; echo \" rc=$?\"", user="tester")
+    check("parity: without the table the VM's own loopback answers (the check can fail)", "rc=0" not in o, o.strip())
+    run(open("/t/host-ports.sh").read())
+    httpd.shutdown()
+
+
+def ssh_test():
+    """SSH on 2222 for a system in the VM (V18): the app's setup and sshd, the app's key file, and a login through the
+    app's forward (an Android port carried to the VM's 127.0.0.1:2222 by an agent run of port-forward.sh)."""
+    import socket as so
+    o, _ = run("[ -r /usr/lib/breadstick/bsl-os.sh ] || command -v sshd >/dev/null 2>&1 || echo bare")
+    if "bare" in o and DISTRO != "debian":
+        # Off Debian, an image without 4.0's breadstick-session (the app's installs there go through its bsl-os.sh;
+        # Debian's apt line needs none, so Debian always takes the app's own install): the server
+        # from the distribution first, so the rest of the app's setup is what runs. A desktop VM image has the session.
+        print("NOTE ssh: no breadstick-session in this image; openssh-server installed by the test", flush=True)
+        run(PKG["install"].format(p="openssh-server" if DISTRO != "archlinux" else "openssh"))
+    o, st = run(open(f"/t/ssh-setup-{DISTRO}.sh").read())
+    check(f"parity: ssh setup ({DISTRO}, V18)", st == 0 and "sshd" in o, o.strip().replace("\n", " | ")[-300:])
+    if st != 0:
+        return
+    sshd = Chan(open("/t/sshd-start.sh").read())
+    time.sleep(2)
+    o, st = run("ss -ltn | grep -c ':2222 '; systemctl is-active ssh.service sshd.service 2>/dev/null | grep -c '^active' || true")
+    w = o.split()
+    check("parity: the app's sshd on 2222, the distribution's own units off (V18)", w[:1] in (["1"], ["2"]) and w[1:2] in (["0"], []),
+          o.strip().replace("\n", " | "))
+    # The banner through the forward, as an Android client gets it.
+    fwd = Chan(open("/t/port-forward.sh").read())
+    got = fwd.lines(15, lambda l: l.startswith("SSH-2.0-"))
+    check("parity: the forward carries sshd's banner (V18)", any(l.startswith("SSH-2.0-OpenSSH") for l in got), " | ".join(got[-3:]))
+    hangup(fwd)
+    # A key in the app's authorized_keys file, and a real login. The client runs in the VM and goes out through the
+    # VM's network relay to this container, where a listener does what VmPortForward does: each connection carried
+    # back in by port-forward.sh. VM -> host -> VM, the way a LAN client's connection goes in.
+    o, _ = run("command -v ssh >/dev/null 2>&1 && echo have")
+    if "have" not in o:
+        # The client is the test's, not the product's (the app's setup installs the server only).
+        run(PKG["install"].format(p={"debian": "openssh-client", "fedora": "openssh-clients"}.get(DISTRO, "openssh")))
+    o, st = run("rm -f /tmp/bslk /tmp/bslk.pub; ssh-keygen -q -t ed25519 -N '' -f /tmp/bslk && cat /tmp/bslk.pub")
+    pub = o.strip().splitlines()[-1:] if st == 0 else []
+    o, st = run(open("/t/authkeys.sh").read(), stdin=(pub[0] + "\n").encode() if pub else b"")
+    o2, _ = run("stat -c '%a %U' /home/tester/.ssh /home/tester/.ssh/authorized_keys")
+    check("parity: authorized_keys written with sshd's modes (V18)", st == 0 and "OK" in o and o2.split() == ["700", "tester", "600", "tester"],
+          (o + " | " + o2).strip().replace("\n", " | "))
+    lst = so.socket(so.AF_INET, so.SOCK_STREAM)
+    lst.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1)
+    lst.bind(("0.0.0.0", 12222))
+    lst.listen(4)
+    me = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
+
+    def carry(c):
+        ch = bslvm.connect(args, bslvm.AGENT_PORT)
+        bslvm.request(ch, "r", bslvm.run_payload(open("/t/port-forward.sh").read().strip(), "root"))
+
+        def down():
+            try:
+                for t, d in bslvm.frames(ch):
+                    if t == "o":
+                        c.sendall(d)
+            except (OSError, EOFError, ValueError):
+                pass
+            try:
+                c.shutdown(so.SHUT_RDWR)
+            except OSError:
+                pass
+
+        threading.Thread(target=down, daemon=True).start()
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                bslvm.send_frame(ch, "d", d)
+        except OSError:
+            pass
+        ch.close()
+        c.close()
+
+    def accept():
+        while True:
+            try:
+                c, _ = lst.accept()
+            except OSError:
+                return
+            threading.Thread(target=carry, args=(c,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    if not me:
+        check("parity: ssh login through the forward (V18)", False, "this container has no address for the VM to reach")
+    else:
+        o, st = run(f"timeout 40 ssh -p 12222 -i /tmp/bslk -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                    f"-o BatchMode=yes -o LogLevel=ERROR tester@{me[0]} 'id -un; echo $SSH_CONNECTION'")
+        check("parity: ssh login through the forward (V18)", st == 0 and o.split()[:1] == ["tester"] and "127.0.0.1" in o,
+              o.strip().replace("\n", " | ")[-300:])
+    lst.close()
+    hangup(sshd)
+    time.sleep(2.5)
+    o, _ = run("ss -ltn | grep -c ':2222 ' || true")
+    check("parity: stopping SSH ends the VM's sshd (V18)", o.strip() == "0", o.strip())
+    run("rm -f /tmp/bslk /tmp/bslk.pub")
+
+
+def engine_test():
+    """The engine marker (V8): /run/bsl/engine, written by the app's user step, and bsl-engine where the image has it."""
+    o, st = run("cat /run/bsl/engine; command -v bsl-engine >/dev/null 2>&1 && bsl-engine || echo no-bsl-engine")
+    w = o.split()
+    check("parity: /run/bsl/engine says vm (V8)", w[:1] == ["vm"] and w[1:2] in (["vm"], ["no-bsl-engine"]), o.strip().replace("\n", " | "))
+
+
+if os.environ.get("PARITY", "1") == "1":
+    engine_test()
+    settings_relay_test()
+    mcp_test()
+    ssh_test()
+
+
 def stream_out(cmd, path):
     """An agent run as root whose output goes to [path] as it comes (a system's tar is too big to hold). Returns
     (exit status, bytes)."""
