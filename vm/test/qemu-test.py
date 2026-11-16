@@ -484,15 +484,27 @@ def bridges_test():
     seed = open("/t/tab-command.sh").read().split("if command -v tmux", 1)[0]
     tab = Chan(seed + "exec bash -li", user="tester", env=["BREADSTICK_TERMINAL=1"], pty=True)
     time.sleep(2)
-    tab.send(("echo BUS=$DBUS_SESSION_BUS_ADDRESS; " + tab_note + "; exit\n").encode())
+    tab.send(("echo BUS=$DBUS_SESSION_BUS_ADDRESS; " + tab_note + "\n").encode())
     out_tab = tab.lines(20, lambda l: False if "BUS=" not in l else False)
     got = helper.lines(10, lambda l: l.startswith("A .bsl-notify"))
     note = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify")]
     check("tabs (V9): a Terminal tab is on the session's bus (/run/bsl/session)",
           st == 0 and any("BUS=unix:path=/tmp/runtime-tester/bus" in l for l in out_tab) and any("From a VM tab" in n for n in note),
           repr([l[-80:] for l in out_tab if "BUS=" in l][:2]) + " " + repr(note)[:200])
-    tab.close()
+    # Round 10 (V9, rootfs 984398c, the third review): after Stop the same tab gets the agent's runtime dir and bus back
+    # from the VM's own profile (terminal.sh in /etc/profile.d/breadstick-vm.sh), with breadstick-terminal.sh as 3.x
+    # ships it; without the give-back they were unset.
     run("rm -f /run/bsl/session")
+    tab.send(b"\n")
+    time.sleep(1)
+    tab.send(b"echo AFTER=\"$XDG_RUNTIME_DIR|$DBUS_SESSION_BUS_ADDRESS|$__bsl_agent_XDG_RUNTIME_DIR|$__bsl_agent_DBUS_SESSION_BUS_ADDRESS\"; "
+             b"grep -c __bsl_agent_ /etc/profile.d/breadstick-vm.sh /etc/profile.d/breadstick-terminal.sh 2>/dev/null | tr '\\n' ' '; echo; exit\n")
+    after = [l for l in tab.lines(15, lambda l: False) if "AFTER=" in l and "echo AFTER" not in l]
+    v = after[-1].split("AFTER=", 1)[1].strip().split("|") if after else []
+    check("tabs (V9): after Stop the tab has the agent's runtime dir and bus back",
+          len(v) == 4 and v[0] != "" and v[1] != "" and v[0] == v[2] and v[1] == v[3],
+          repr(after[-1:]))
+    tab.close()
     o, st = run("(printf 'copied in the VM' | timeout 10 xclip -quiet -selection clipboard >/dev/null 2>&1 &); echo ok",
                 user="tester", env=["DISPLAY=:0"])
     got = helper.lines(8, lambda l: False)
