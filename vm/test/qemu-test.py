@@ -918,9 +918,16 @@ def v14_print_test():
         check("parity: breadstick-print in the VM (V14)", False, "no bsl-print-server or lp (Fedora needs RPM_STAGE=)")
         return
     _, st = bslvm.simple(args, "f", b"/run/bsl/features\0" + b"644\0" + b"notify-v2 clipboard-v1 print-v1 ai-v1 mic-v1 region-v1 media-v1 camera-v2\n")
+    # The distribution's own CUPS running, as a user's may be: stopped for the session, started again after it.
+    units = "cups.socket cups.path cups.service"
+    run("systemctl start cups.service 2>/dev/null || true")
+    before, _ = run(f"for u in {units}; do systemctl -q is-active $u 2>/dev/null && echo $u; done")
     ch = Chan(app_text("print-server.sh"))
     # The script's link, not the distribution's own socket (which it stops for the session).
     o, st = run("n=0; while [ ! -L /run/cups/cups.sock ] && [ $n -lt 150 ]; do sleep 0.2; n=$((n+1)); done; ls -l /run/cups/cups.sock")
+    during, _ = run(f"for u in {units}; do systemctl -q is-active $u 2>/dev/null && echo $u; done")
+    check("parity: the distribution's CUPS is stopped for the session (V14)",
+          bool(before.split()) and not during.split(), f"before: {before.split()} during: {during.split()}")
     with open("/w/print-test.pdf", "wb") as f:
         f.write(TINY_PDF)
     o2, _ = run("printf '%s' '" + b64(TINY_PDF) + "' | base64 -d > /tmp/print-test.pdf; chmod 644 /tmp/print-test.pdf; "
@@ -946,6 +953,14 @@ def v14_print_test():
     o, _ = run("pgrep -f '[c]upsd -f -c /etc/breadstick/cups' >/dev/null && echo cupsd-left; [ -L /run/cups/cups.sock ] && echo link-left; "
                "echo checked; systemctl is-active cups.service 2>/dev/null || true")
     check("parity: closing the channel ends the print server (V14)", o.strip().split("\n")[0] == "checked", o.strip().replace("\n", " | "))
+    after = ""
+    for _ in range(20):
+        after, _ = run(f"for u in {units}; do systemctl -q is-active $u 2>/dev/null && echo $u; done")
+        if sorted(after.split()) == sorted(before.split()):
+            break
+        time.sleep(0.5)
+    check("parity: the distribution's CUPS runs again after the session (V14)",
+          bool(before.split()) and sorted(after.split()) == sorted(before.split()), f"before: {before.split()} after: {after.split()}")
     # The check can fail: without print-v1 the backend refuses the job, and nothing is handed over.
     _, st = bslvm.simple(args, "f", b"/run/bsl/features\0" + b"644\0" + b"notify-v2 clipboard-v1\n")
     ch = Chan(app_text("print-server.sh"))
@@ -1017,6 +1032,25 @@ def v14_camera_test():
     check("parity: /dev/video0 in the VM streams the app's camera (V14)",
           st == 0 and "CARD Breadstick" in o and re.search(r"FRAME [1-9][0-9]* ", o) is not None and any("t=tok123abc" in l for l in seen),
           o.strip().replace("\n", " | ")[-200:] + f" | requests {seen[:2]}")
+    # What the app launches (a Floating app, the Apps drawer, a shortcut) gets the library from the app's own launch
+    # text (launch-camera.sh, VmCommands.launch with the camera), under the session's check (bsl-cam-ok): the agent
+    # clears the environment, so nothing is preloaded by hand here.
+    run("printf '%s' '" + b64(probe.encode()) + "' | base64 -d > /usr/local/lib/bsl-cam-probe.py; "
+        "printf '#!/bin/sh\\necho \"PRELOAD=$LD_PRELOAD\"\\nexec timeout 30 python3 /usr/local/lib/bsl-cam-probe.py\\n' > /usr/local/bin/bsl-cam-probe; "
+        "chmod 755 /usr/local/bin/bsl-cam-probe; install -d -o tester -m 700 /tmp/runtime-tester; "
+        "touch /tmp/runtime-tester/bsl-cam-ok; chown tester /tmp/runtime-tester/bsl-cam-ok")
+    n0 = len(seen)
+    o, st = run(app_text("launch-camera.sh"), user="tester")
+    check("parity: an app the app launches in the VM gets /dev/video0 (V14)",
+          st == 0 and "PRELOAD=/usr/lib/breadstick/libbsl-cam.so" in o and "CARD Breadstick" in o
+          and re.search(r"FRAME [1-9][0-9]* ", o) is not None and len(seen) > n0,
+          o.strip().replace("\n", " | ")[-200:])
+    # The check can fail: without the session's bsl-cam-ok nothing is preloaded, and there is no /dev/video0.
+    run("rm -f /tmp/runtime-tester/bsl-cam-ok")
+    o, st = run(app_text("launch-camera.sh"), user="tester")
+    check("parity: without the session's camera check no webcam (the check can fail)",
+          "libbsl-cam" not in o and "CARD Breadstick" not in o, o.strip().replace("\n", " | ")[-160:])
+    run("rm -f /usr/local/bin/bsl-cam-probe /usr/local/lib/bsl-cam-probe.py")
     # The check can fail: without the table the VM's loopback has no camera server, and STREAMON (read) fails.
     run("nft delete table ip breadstick_vm_host")
     o, st = run(f"LD_PRELOAD=/usr/lib/breadstick/libbsl-cam.so timeout 20 python3 -c \"{probe}\"", user="tester")
