@@ -138,6 +138,9 @@ def splice(a, b):
         pass
 
 
+AI_PORT = None
+
+
 def net_channel(ch, stats, became_busy):
     """One pooled channel: wait for the guest's request, then serve it (vm/PROTOCOL.md, BSN1)."""
     try:
@@ -157,6 +160,10 @@ def net_channel(ch, stats, became_busy):
         addr = readn(ch, 4 if fam == 4 else 16)
         port = struct.unpack("<H", readn(ch, 2))[0]
         host = socket.inet_ntop(socket.AF_INET if fam == 4 else socket.AF_INET6, addr)
+        # The app's VmNetRelay.destination: the on-device AI server's address in the VM (AiController.VM_HOST) on its
+        # port is the app's own loopback. AI_PORT is the stand-in server's port (qemu-test.py ai_test), else none.
+        if AI_PORT is not None and fam == 4 and host == "192.0.2.1" and port == AI_PORT:
+            host = "127.0.0.1"
         try:
             r = socket.create_connection((host, port), timeout=15)
             r.settimeout(None)

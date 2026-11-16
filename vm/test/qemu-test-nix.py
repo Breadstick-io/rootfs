@@ -170,6 +170,26 @@ check("languages never undo a rollback", "one you rolled back to" in o and "rc=4
 o, st = run(f"systemctl is-active {UNITS}")
 check("the guest's units after the rollback's switch", o.split() == ["active"] * 3, o.strip().replace("\n", " "))
 
+# Settings > Updates and Repair in the VM (plan 5.14 V15, round 11): the app's own texts for Breadstick-Nix (rootfs
+# vm/test copies of PackageOps.Nix.countUpdates and LinuxEnvironment.repairScriptFor, which Android's
+# VmPackagesParityTest checks), as root through the agent as MainViewModel runs them there. Nix's Updates themselves
+# are its page's update and apply, checked above.
+def app_text(name):
+    """rootfs vm/test/<name>, the app's own text, with its sha256 printed for AutoBuild's parity gate ("same")."""
+    import hashlib
+    b = open("/t/" + name, "rb").read()
+    print(f"SCRIPT {name} {hashlib.sha256(b).hexdigest()}", flush=True)
+    return b.decode()
+
+
+o, st = run(app_text("updates-check-nix.sh"))
+check("parity: Updates' check in the VM (nix, V15)", st == 0 and o.strip().splitlines()[-1:] in (["0"], ["1"]), o.strip()[-200:])
+o, st = run(app_text("repair-nix.sh") + " 2>&1")
+check("parity: Repair in the VM (nix, V15)", st == 0 and "repair finished" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run(f"systemctl is-active {UNITS}; {B} status --json | head -c 400")
+check("parity: the agent's units and the generation after Repair (nix, V15)", o.split()[:3] == ["active"] * 3 and '"engine": "vm"' in o,
+      o.strip().replace("\n", " ")[-300:])
+
 bslvm.simple(args, "o", b"poweroff")
 try:
     q.wait(120)

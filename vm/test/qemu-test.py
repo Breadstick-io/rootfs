@@ -399,6 +399,41 @@ def b64(b):
     return base64.b64encode(b).decode()
 
 
+def projection_test(helper):
+    """Android's notifications and agenda in the VM's notification center (plan 5.14 V13, round 11): the files the app's
+    VmRunBsl writes into the VM's /run/bsl (the agent's file op, 0644, as AndroidNotificationBridge and CalendarBridge
+    write them on proot), read by the image's own center.py as the Linux user; a reply from there comes back to the app
+    as `.bsl-notify-action` through the app's helper; switching the projection off removes the VM's copies
+    (VmRunBsl.removeScript's text)."""
+    import base64
+    o, st = run("test -r /usr/lib/breadstick/center.py || exit 77")
+    if st == 77:
+        print("SKIP projection (no breadstick-theme in this image)")
+        return
+    now = int(time.time() * 1000)
+    proj = f"0|io.example|1|r11|0\t{now}\tMessages\tAda\tLunch at noon?\t0:1:Reply|2:0:Mark as read\n".encode()
+    cal = f"{now + 3600_000}\t{now + 7200_000}\t0\tStandup\tRoom 4\tWork\n".encode()
+    _, st1 = bslvm.simple(args, "f", b"/run/bsl/android-notifications\0" + b"644\0" + proj)
+    _, st2 = bslvm.simple(args, "f", b"/run/bsl/calendar\0" + b"644\0" + cal)
+    reader = ("import sys; sys.path.insert(0, '/usr/lib/breadstick'); import center; a = center.read_android(); e = center.read_events(); "
+              "print('A', len(a), a[0]['title'] if a else '-', [x['title'] for x in a[0]['actions']] if a else []); "
+              "print('E', -1 if e is None else len(e), e[0]['title'] if e else '-'); "
+              "print('SENT', center.send_action(a[0]['key'], 0, 'On my way') if a else None)")
+    o, st = run(f"python3 -c \"{reader}\"", user="tester", env=["DISPLAY=:0", "HOME=/home/tester"])
+    check("parity: Android's notifications and agenda reach the VM's notification center (V13)",
+          st1 == 0 and st2 == 0 and st == 0 and "A 1 Ada ['Reply', 'Mark as read']" in o and "E 1 Standup" in o,
+          f"file ops {st1}/{st2}, center: {o.strip().replace(chr(10), ' | ')[-300:]}")
+    got = helper.lines(10, lambda l: l.startswith("A .bsl-notify-action"))
+    acts = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify-action")]
+    check("parity: a reply from the VM's notification center reaches the app (V13)",
+          "SENT True" in o and any(a.startswith("0|io.example|1|r11|0\t0\tOn my way") for a in acts), repr(acts)[:300])
+    # Switched off: VmRunBsl.removeScript for each projection, as root through the agent.
+    run("rm -f /run/bsl/android-notifications; rm -f /run/bsl/calendar")
+    o, st = run(f"python3 -c \"{reader}\"", user="tester", env=["DISPLAY=:0", "HOME=/home/tester"])
+    check("parity: switched off, the projection leaves the VM's notification center (V13)", "A 0 -" in o and "E -1 -" in o,
+          o.strip().replace("\n", " | ")[-300:])
+
+
 def bridges_test():
     """The VM session's bridges (Android vm/VmBridges.kt): the session script in Floating mode as the app
     starts it in the VM, then sound out, the microphone in, a notification and the clipboard both ways."""
@@ -472,6 +507,7 @@ def bridges_test():
     import base64
     note = [base64.b64decode(l.split(" ", 2)[2]).decode() for l in got if l.startswith("A .bsl-notify")]
     check("bridges: a notification reaches the app", st == 0 and any("Hello from the VM" in n for n in note), (o.strip(), note).__repr__())
+    projection_test(helper)
     # Plan 5.14 V9: a Terminal tab reaches the session's bus. The app writes /run/bsl/session in the VM while the
     # session runs (Android VmCommands.sessionEnvLines); breadstick-terminal.sh gives a tab its lines at the prompt.
     marker = ("BSL_SESSION_USER=tester\nXDG_RUNTIME_DIR=/tmp/runtime-tester\nDBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/runtime-tester/bus\n"
@@ -1028,11 +1064,169 @@ def engine_test():
     check("parity: /run/bsl/engine says vm (V8)", w[:1] == ["vm"] and w[1:2] in (["vm"], ["no-bsl-engine"]), o.strip().replace("\n", " | "))
 
 
+def ai_test():
+    """On-device AI with no desktop running (plan 5.14 V13, round 11): /run/bsl/ai as the app's VmInbound writes it at each
+    boot (ai-file.txt, AiController's text for the VM, which Android's VmInboundSyncTest checks), and bsl-ai reaching
+    the app's server at 192.0.2.1 through the VM's network relay (bslvm.AI_PORT stands in for VmNetRelay.destination);
+    then the server off (VmInbound.AI_OFF): bsl-ai says off."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    port = 18434
+
+    class H(BaseHTTPRequestHandler):
+        def _send(self, body, kind="application/json"):
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/api/version":
+                self._send(b'{"version":"0.6.0"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/api/chat":
+                self._send(b'{"message":{"role":"assistant","content":"Hello from the app."},"done":false}\n{"done":true}\n',
+                           "application/x-ndjson")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    bslvm.AI_PORT = port
+    # No desktop: what an earlier check's session left (its X server is gone) is ended first, so nothing of a session
+    # could have written the file or exported OLLAMA_HOST.
+    desk, _ = run("pkill -u tester -x xfce4-session; n=0; while pgrep -u tester -x xfce4-session >/dev/null && [ $n -lt 50 ]; do "
+                  "sleep 0.2; n=$((n+1)); done; pgrep -u tester -x xfce4-session >/dev/null && echo desktop || echo none")
+    _, st = bslvm.simple(args, "f", b"/run/bsl/ai\0" + b"644\0" + app_text("ai-file.txt").encode())
+    o, rc = run("command -v bsl-ai >/dev/null || exit 77; bsl-ai status; echo rc=$?", user="tester")
+    if rc == 77:
+        # No breadstick-tools in this image (a base image): the address the file names, as bsl-ai reads it.
+        o, rc = run("h=$(sed -n 's/^host=//p' /run/bsl/ai); p=$(sed -n 's/^port=//p' /run/bsl/ai); "
+                    "curl -sS -m 10 http://$h:$p/api/version && echo && echo 'Server: answering' && echo rc=0", user="tester")
+    check("parity: bsl-ai reaches the app's AI server with no desktop running (V13)",
+          st == 0 and "Server: answering" in o and "rc=0" in o and desk.strip() == "none", f"desktop: {desk.strip()}; " + o.strip().replace("\n", " | ")[-300:])
+    o, rc = run("command -v bsl-ai-chat >/dev/null || exit 77; bsl-ai chat 'Say hello' < /dev/null", user="tester")
+    if rc != 77:
+        check("parity: bsl-ai chat answers with no desktop running (V13)", rc == 0 and "Hello from the app." in o, f"exit {rc}: {o.strip()[-200:]}")
+    # The route is the relay's: without its mapping nothing answers at 192.0.2.1 (the check can fail).
+    bslvm.AI_PORT = None
+    o, _ = run("h=$(sed -n 's/^host=//p' /run/bsl/ai); p=$(sed -n 's/^port=//p' /run/bsl/ai); curl -sS -m 5 -o /dev/null http://$h:$p/api/version; echo rc=$?", user="tester")
+    check("parity: without the relay's mapping the AI address answers nothing (the check can fail)", "rc=0" not in o, o.strip()[-200:])
+    _, st = bslvm.simple(args, "f", b"/run/bsl/ai\0" + b"644\0" + b"state=off\n")
+    o, rc = run("command -v bsl-ai >/dev/null || exit 77; bsl-ai status; echo rc=$?; bsl-ai env; echo env=$?", user="tester")
+    if rc != 77:
+        check("parity: the server off, bsl-ai says off and exports nothing (V13)", "On-device AI: off" in o and "rc=1" in o
+              and "env=1" in o and "OLLAMA_HOST" not in o.replace("OLLAMA_HOST=", ""), o.strip().replace("\n", " | ")[-300:])
+    httpd.shutdown()
+
+
+def packages_test():
+    """Packages in a VM off Debian (plan 5.14 V15) and a package run cut off midway there (V16), round 11, with the app's
+    own texts (rootfs vm/test copies that Android's VmPackagesParityTest checks): a marked run still going is left
+    alone; one killed midway is found by the app's recovery, as root through the agent, which looks in the VM's /proc;
+    Updates' check and Repair as the app runs them in the VM. Debian marks no run (its dpkg's own evidence, as in 3.x)."""
+    if DISTRO not in ("fedora", "archlinux"):
+        return
+    o, st = run(". /usr/lib/breadstick/bsl-os.sh && command -v bsl_pkg_mark >/dev/null && command -v bsl_pkg_repair >/dev/null || exit 77")
+    if st == 77:
+        print(f"SKIP packages (V15/V16): this image's breadstick-session has no package-run marker")
+        return
+    m = "/var/lib/breadstick/package-run"
+    run(f"rm -f {m} {m}.cut")
+    if DISTRO == "archlinux":
+        # pacman.breadstick.io serves nothing until 4.0's publish: its section is taken out of this test VM's
+        # configuration (the image's own file names it), so Arch's mirrors alone answer, as they will with it live.
+        # (With it in, pacman -Qu warns that its database does not exist, and the recovery keeps every cut-off run for
+        # Updates: seen in round 11's first run.)
+        run("cp -p /etc/pacman.conf /etc/pacman.conf.r11; sed -i '/^\\[breadstick/,/^$/d' /etc/pacman.conf")
+    # V16 (a): a run that is still going.
+    live = Chan(app_text(f"pkg-marked-{DISTRO}.sh"))
+    # The marker, then its also= line (the subshell adds itself first thing; under TCG a moment later).
+    o, _ = run(f"n=0; while ! grep -q '^also=' {m} 2>/dev/null && [ $n -lt 200 ]; do sleep 0.1; n=$((n+1)); done; cat {m}")
+    pids = re.findall(r"^(?:pid|also|tx)=(\d+)", o, re.M)
+    check("parity: the app's marked run writes its marker in the VM (V16)", len(pids) >= 2, o.strip().replace("\n", " | ")[-300:])
+    o, _ = run(app_text(f"pkg-recover-{DISTRO}.sh"))
+    alive, _ = run(" ".join(f"kill -0 {p} 2>/dev/null &&" for p in pids) + " echo alive")
+    check("parity: a package run still going in the VM is left alone (V16)",
+          "BSL-RUN check" in o and "BSL-RUN marked" in o and "BSL-RUN cut" not in o and "No package run was cut off." in o and "alive" in alive,
+          o.strip().replace("\n", " | ")[-300:])
+    # V16 (b): killed midway, the run's processes and the stand-in for its package manager, no unmark.
+    # Every process of the run and the ones under them (the subshell's sleep), then the run's own.
+    kids = " ".join(f"$(pgrep -P {p})" for p in pids)
+    run(f"k=\"{kids}\"; g=; for c in $k; do g=\"$g $(pgrep -P $c)\"; done; for p in $g $k {' '.join(pids)}; do kill -9 $p 2>/dev/null; done; sleep 0.5")
+    hangup(live)
+    o, _ = run(f"test -e {m} && echo marker-left; for p in {' '.join(pids)}; do kill -0 $p 2>/dev/null && echo still-$p; done")
+    check("parity: a run killed midway leaves its marker in the VM (V16)", "marker-left" in o and "still-" not in o, o.strip())
+    o, _ = run(app_text(f"pkg-recover-{DISTRO}.sh"))
+    ex = re.findall(r"^BSL-RUN exit (\d+)", o, re.M)
+    left, _ = run(f"test -e {m} && echo marker; test -e {m}.cut && echo cut; true")
+    if DISTRO == "fedora":
+        ok = ex == ["0"] and "marker" not in left and "cut" not in left and "BSL-RUN cut" not in o
+    else:
+        # Arch: settled when its pacman transactions all ended and nothing is ahead; otherwise kept for Updates, and
+        # nothing synced or upgraded either way.
+        ok = "marker" not in left and ((ex == ["0"] and "cut" not in left) or (ex == ["1"] and "cut" in left and "BSL-RUN cut" in o
+                                                                                 and "until Updates finishes it" in o))
+    check(f"parity: a package run killed midway in the VM is found and repaired ({DISTRO}, V16)", "BSL-RUN check" in o and ok,
+          f"{left.strip()} | " + o.strip().replace("\n", " | ")[-400:])
+    o2, _ = run("[ ! -e /var/lib/breadstick/package-run.cut ] || echo 'BSL-RUN cut'")
+    check("parity: the start's record probe says what is kept (V16)", ("BSL-RUN cut" in o2) == ("cut" in left), o2.strip() + " | " + left.strip())
+    run(f"rm -f {m}.cut")
+
+    # V15: Updates' check and Repair as the app runs them in the VM (its family's own, under the marker).
+    h = None
+    if DISTRO == "fedora":
+        o, st = run("grep -qx 'baseurl=file:///bsl-stage/fedora/$releasever/$basearch/' /etc/yum.repos.d/breadstick.repo || exit 77")
+        if st == 77 or not os.path.isdir("/rpmrepo"):
+            print("SKIP packages (V15): Fedora's Updates need Breadstick's repository (RPM_STAGE=, a -staged- image)")
+            return
+        h = share_open()
+        o, _ = run("mountpoint -q /bsl-stage || { mkdir -p /bsl-stage && mount --bind /mnt/host/rpmrepo /bsl-stage; }; test -s /bsl-stage/RPM-GPG-KEY-breadstick && echo bound")
+        if "bound" not in o:
+            check("parity: the RPM stage reaches the VM (V15)", False, o.strip())
+            return
+    dbs = "stat -c '%n %Y %s' /var/lib/pacman/sync/*.db 2>/dev/null"
+    before, _ = run(dbs)
+    o, st = run(app_text(f"updates-check-{DISTRO}.sh"))
+    check(f"parity: Updates' check in the VM ({DISTRO}, V15)", st == 0 and o.strip().splitlines()[-1:] != [] and o.strip().splitlines()[-1].isdigit(),
+          f"exit {st}: {o.strip()[-200:]}")
+    if DISTRO == "archlinux":
+        after, _ = run(dbs)
+        check("parity: Updates' check leaves the sync databases as they were (archlinux, V15)",
+              "/var/lib/pacman/sync/" in before and before == after, (before.strip() + " => " + after.strip()).replace("\n", " | ")[-300:])
+    heavy = (os.environ.get("HEAVY") or ("1" if ARCH == "arm64" else "0")) == "1"
+    if DISTRO == "archlinux" and not heavy:
+        print("SKIP packages (V15): Arch's Repair and Updates are full upgrades (HEAVY=1 to run them under TCG)")
+    else:
+        o, st = run(app_text(f"repair-{DISTRO}.sh"))
+        left, _ = run(f"test -e {m} && echo marker; test -e {m}.cut && echo cut; true")
+        check(f"parity: Repair in the VM ({DISTRO}, V15)", st == 0 and "checking the package database" in o and left.strip() == "",
+              f"exit {st} {left.strip()}: " + " | ".join(o.strip().splitlines()[-4:])[-300:])
+        # Arch's Updates (upgrade-archlinux.sh) also installs breadstick-desktop from [breadstick] when it is missing,
+        # which this test VM cannot reach until 4.0's publish: not run here (gate-distro.sh runs it on proot).
+    if DISTRO == "archlinux":
+        run("mv -f /etc/pacman.conf.r11 /etc/pacman.conf")
+    if h is not None:
+        run("umount /bsl-stage")
+        share_close(h)
+
+
 if os.environ.get("PARITY", "1") == "1":
     engine_test()
     settings_relay_test()
     mcp_test()
     ssh_test()
+    ai_test()
+    packages_test()
 
 
 def stream_out(cmd, path):

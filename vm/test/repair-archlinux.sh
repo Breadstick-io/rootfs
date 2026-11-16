@@ -1,0 +1,4 @@
+bsl_m=; if [ -r /usr/lib/breadstick/bsl-os.sh ] && . /usr/lib/breadstick/bsl-os.sh && command -v bsl_pkg_mark >/dev/null 2>&1 && command -v bsl_pkg_also >/dev/null 2>&1 && bsl_pkg_mark repair; then bsl_m=1; fi
+( [ -z "$bsl_m" ] || bsl_pkg_also $$
+echo '[BSL] checking for a stale package lock...'; if command -v pgrep >/dev/null 2>&1 && ! pgrep -x pacman >/dev/null 2>&1; then rm -f /var/lib/pacman/db.lck; fi; echo '[BSL] finishing the upgrade...'; bsl_s=0; { { ! command -v bsl_pkg_mend >/dev/null 2>&1 || bsl_pkg_mend; } && { pacman -Sy --needed --noconfirm archlinux-keyring && pacman -Su --noconfirm; }; } 2>&1 || bsl_s=$?; echo '[BSL] checking the package database...'; pacman -Dk 2>&1 | tail -3; if [ "$bsl_s" = 0 ]; then echo '[BSL] repair finished.'; else echo '[BSL] repair failed.'; (exit $bsl_s); fi
+); bsl_rc=$?; [ -z "$bsl_m" ] || bsl_pkg_unmark $bsl_rc; exit $bsl_rc

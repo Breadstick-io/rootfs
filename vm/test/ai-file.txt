@@ -1,0 +1,5 @@
+state=available
+host=192.0.2.1
+port=18434
+model=gemini-nano:latest
+base=nano-v3
