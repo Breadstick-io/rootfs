@@ -68,12 +68,64 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
       /^Architecture: / { a = $2 }
       /^Status: / { st = substr($0, 9) }
       END { flush(); print k + 0 }' /var/lib/dpkg/status "$w/dpkg-status" > "$w/dpkg-n"
+    bsl_count() { awk '/^Package: / { k++ } END { print k + 0 }' "$1"; }
+    bsl_check() {
+      apt-get check -q -o Dir::State::status="$1" -o Dir::State::lists="$w/apt-lists" -o Dir::Cache::pkgcache= \
+        -o Dir::Cache::srcpkgcache= -o Debug::NoLocking=1 > "$2" 2>&1
+    }
+    o=0
+    if [ -s "$w/dpkg-add" ] && ! command -v apt-get >/dev/null 2>&1; then
+      o=$(bsl_count "$w/dpkg-add")
+      : > "$w/dpkg-add"
+    fi
+    mkdir -p "$w/apt-lists/partial"
+    i=0
+    while [ -s "$w/dpkg-add" ]; do
+      { cat /var/lib/dpkg/status; [ -z "$(tail -c 1 /var/lib/dpkg/status)" ] || echo; echo; cat "$w/dpkg-add"; } > "$w/dpkg-try"
+      if bsl_check "$w/dpkg-try" "$w/dpkg-check"; then break; fi
+      : > "$w/dpkg-bad"
+      awk -v out="$w/dpkg-bad" '
+        FNR == 1 { f++ }
+        f == 1 { if ($0 ~ /^Package: /) add[$2] = 1; next }
+        {
+          l = $0
+          if (l ~ /^ [^ ]+ : /) { p = substr(l, 2, index(l, " : ") - 2); sub(/:.*/, "", p); l = substr(l, index(l, " : ") + 3) }
+          else if (l ~ /^  /) sub(/^ +/, "", l)
+          else { p = ""; next }
+          if (p == "") next
+          t = ""
+          if (l ~ /^(Pre-Depends|Depends|Breaks|Conflicts): /) { t = l; sub(/^[^ ]+ /, "", t); sub(/[ (].*/, "", t); sub(/:.*/, "", t) }
+          if (p in add) bad[p] = 1
+          else if (t in add) bad[t] = 1
+        }
+        END { for (b in bad) print b > out }' "$w/dpkg-add" "$w/dpkg-check"
+      if [ ! -s "$w/dpkg-bad" ]; then
+        bsl_check /var/lib/dpkg/status "$w/dpkg-check0" || true
+        grep '^ ' "$w/dpkg-check0" > "$w/dpkg-c0" || true
+        grep '^ ' "$w/dpkg-check" > "$w/dpkg-c1" || true
+        grep -vxF -f "$w/dpkg-c0" "$w/dpkg-c1" > "$w/dpkg-c2" || true
+        if [ -s "$w/dpkg-c1" ] && [ ! -s "$w/dpkg-c2" ]; then break; fi
+        i=50
+      fi
+      i=$((i + 1))
+      if [ "$i" -gt 50 ]; then
+        o=$((o + $(bsl_count "$w/dpkg-add")))
+        : > "$w/dpkg-add"
+        break
+      fi
+      awk -v bad="$w/dpkg-bad" '
+        BEGIN { while ((getline x < bad) > 0) b[x] = 1; RS = ""; ORS = "\n\n" }
+        { n = ""; c = split($0, L, "\n"); for (j = 1; j <= c; j++) if (L[j] ~ /^Package: /) n = substr(L[j], 10); if (!(n in b)) print }' \
+        "$w/dpkg-add" > "$w/dpkg-add.1"
+      o=$((o + $(bsl_count "$w/dpkg-add") - $(bsl_count "$w/dpkg-add.1")))
+      mv -f "$w/dpkg-add.1" "$w/dpkg-add"
+    done
     if [ -s "$w/dpkg-add" ]; then
       { cat /var/lib/dpkg/status; [ -z "$(tail -c 1 /var/lib/dpkg/status)" ] || echo; echo; cat "$w/dpkg-add"; } > /var/lib/dpkg/status.bsl-new
       chmod 0644 /var/lib/dpkg/status.bsl-new
       mv -f /var/lib/dpkg/status.bsl-new /var/lib/dpkg/status
     fi
-    echo "package database (dpkg): the VM's own packages put back: $(cat "$w/dpkg-n")"
+    echo "package database (dpkg): the VM's own packages put back: $(bsl_count "$w/dpkg-add"), left out: $o"
   )
   r=$?
   set -e
@@ -95,12 +147,31 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
       done < "$w/rpm-files"
       [ "$fs" = missing ] || printf '%s\n' "$pk" >> "$w/rpm-add"
     done
+    o=0
     if [ -s "$w/rpm-add" ]; then
+      rpm -Va --nofiles --nodigest --nosignature --noscripts > "$w/rpm-v0" 2>&1 || true
       awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next } !($1 in add) { print $2 }' "$w/rpm-add" "$w/rpm-vm" > "$w/rpm-drop"
       [ ! -s "$w/rpm-drop" ] || xargs rpm --dbpath "$w/rpmdb" -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-drop" 2>>/var/log/breadstick-vm-restore.log
       rpmdb --dbpath "$w/rpmdb" --exportdb | rpmdb --importdb
+      i=0
+      while [ -s "$w/rpm-add" ]; do
+        if rpm -Va --nofiles --nodigest --nosignature --noscripts > "$w/rpm-v" 2>&1; then break; fi
+        grep -vxF -f "$w/rpm-v0" "$w/rpm-v" > "$w/rpm-v1" || true
+        [ -s "$w/rpm-v1" ] || break
+        awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next }
+          FILENAME == ARGV[2] { if ($1 in add) key[$2] = $1; next }
+          /^Unsatisfied dependencies for .*:$/ { x = substr($0, 30, length($0) - 30); sub(/-[0-9]+:/, "-", x); if (x in key) print key[x] }' \
+          "$w/rpm-add" "$w/rpm-vm" "$w/rpm-v1" | sort -u > "$w/rpm-bad"
+        i=$((i + 1))
+        if [ ! -s "$w/rpm-bad" ] || [ "$i" -gt 50 ]; then cp "$w/rpm-add" "$w/rpm-bad"; fi
+        awk -F '\t' 'FILENAME == ARGV[1] { b[$0] = 1; next } ($1 in b) { print $2 }' "$w/rpm-bad" "$w/rpm-vm" \
+          | xargs rpm -e --justdb --nodeps --noscripts --notriggers --allmatches 2>>/var/log/breadstick-vm-restore.log
+        grep -vxF -f "$w/rpm-bad" "$w/rpm-add" > "$w/rpm-add.1" || true
+        o=$((o + $(wc -l < "$w/rpm-bad")))
+        mv -f "$w/rpm-add.1" "$w/rpm-add"
+      done
     fi
-    echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add")"
+    echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add"), left out: $o"
   )
   r=$?
   set -e
@@ -112,14 +183,38 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
     for e in "$s"/var/lib/pacman/local/*/desc; do
       [ ! -f "$e" ] || awk '/^%NAME%$/ { getline; print; exit }' "$e"
     done | sort -u > "$w/pac-have"
-    k=0
+    : > "$w/pac-kept"
     for d in /var/lib/pacman/local/*/; do
       d=${d%/}
       [ -f "$d/desc" ] && [ ! -e "$s$d" ] || continue
       pn=$(awk '/^%NAME%$/ { getline; print; exit }' "$d/desc")
-      if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else k=$((k + 1)); fi
+      if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else printf '%s\t%s\n' "$pn" "$d" >> "$w/pac-kept"; fi
     done
-    echo "package database (pacman): the VM's own packages kept: $k"
+    o=0
+    if [ -s "$w/pac-kept" ]; then
+      mkdir -p "$w/pacdb0" "$w/pac-out"
+      cp -a /var/lib/pacman/local "$w/pacdb0/local"
+      cut -f 2 "$w/pac-kept" | while IFS= read -r d; do rm -rf "$w/pacdb0/local/${d##*/}"; done
+      pacman -Dk --dbpath "$w/pacdb0" > "$w/pac-c0" 2>&1 || true
+      i=0
+      while [ -s "$w/pac-kept" ]; do
+        if pacman -Dk > "$w/pac-c" 2>&1; then break; fi
+        grep -vxF -f "$w/pac-c0" "$w/pac-c" > "$w/pac-c1" || true
+        [ -s "$w/pac-c1" ] || break
+        awk -F '\t' 'FILENAME == ARGV[1] { kept[$1] = $0; next }
+          { split($0, q, "\047") }
+          / dependency for \047/ { if (q[4] in kept) bad[q[4]] = 1 }
+          / conflicts with \047/ { if (q[2] in kept) bad[q[2]] = 1; if (q[4] in kept) bad[q[4]] = 1 }
+          END { for (b in bad) print kept[b] }' "$w/pac-kept" "$w/pac-c1" > "$w/pac-bad"
+        i=$((i + 1))
+        if [ ! -s "$w/pac-bad" ] || [ "$i" -gt 50 ]; then cp "$w/pac-kept" "$w/pac-bad"; fi
+        cut -f 2 "$w/pac-bad" | while IFS= read -r d; do mv "$d" "$w/pac-out/"; done
+        awk -F '\t' 'FILENAME == ARGV[1] { b[$1] = 1; next } !($1 in b)' "$w/pac-bad" "$w/pac-kept" > "$w/pac-kept.1"
+        o=$((o + $(wc -l < "$w/pac-bad")))
+        mv -f "$w/pac-kept.1" "$w/pac-kept"
+      done
+    fi
+    echo "package database (pacman): the VM's own packages kept: $(wc -l < "$w/pac-kept"), left out: $o"
   )
   r=$?
   set -e

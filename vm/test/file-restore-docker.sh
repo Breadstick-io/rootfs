@@ -28,7 +28,7 @@ proot-hosts: 0
 proot-machine-id: 0123456789abcdef0123456789abcdef
 proot-files: yes yes yes yes yes yes
 proot-left: yes yes yes
-proot-dpkg: 1 install ok installed | yes unlisted 1 0
+proot-dpkg: 1 install ok installed | yes unlisted 1 0 0
 vm-backup-rc: 0
 vm-unpack-rc: 0
 vm-restore-rc: 0

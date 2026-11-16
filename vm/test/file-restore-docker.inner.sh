@@ -103,8 +103,9 @@ say proot-hosts "$(grep -c proot /etc/hosts)"
 say proot-machine-id "$(cat /etc/machine-id)"
 say proot-files "$(yn test -f /etc/bsl-from-backup.conf) $(yn test ! -e /etc/bsl-after-image.conf) $(yn test ! -e /opt/bsl-after) $(yn test ! -e /home/tester/after.txt) $(yn test -f /usr/share/bsl-image-only.txt) $(yn test -f /etc/hosts.vm)"
 say proot-left "$(yn test ! -e $S) $(yn test ! -e /var/lib/breadstick-vm/restore.work) $(yn test -s /var/lib/breadstick-vm/image-files.gz)"
-# The VM's own package is in the database again, the later one is not, nothing is listed twice and dpkg finds it sound.
-say proot-dpkg "$(sed -n 's/^package database (dpkg): .*: //p' /tmp/r.log) $(dpkg-query -W -f='${Status}' bsl-vm-only 2>&1) | $(yn test ! -e /var/lib/dpkg/info/bsl-vm-later.list) $(dpkg-query -W bsl-vm-later >/dev/null 2>&1 && echo listed || echo unlisted) $(grep -c '^Package: base-files$' /var/lib/dpkg/status) $(dpkg --audit 2>&1 | wc -l)"
+# The VM's own package is in the database again, the later one is not, nothing is listed twice, and dpkg and apt find
+# it sound (apt-get check: its dependencies, round 10 review).
+say proot-dpkg "$(sed -n 's/^package database (dpkg): .*put back: \([0-9]*\).*/\1/p' /tmp/r.log) $(dpkg-query -W -f='${Status}' bsl-vm-only 2>&1) | $(yn test ! -e /var/lib/dpkg/info/bsl-vm-later.list) $(dpkg-query -W bsl-vm-later >/dev/null 2>&1 && echo listed || echo unlisted) $(grep -c '^Package: base-files$' /var/lib/dpkg/status) $(dpkg --audit 2>&1 | wc -l) $(apt-get -qq check 2>&1 | wc -l)"
 
 # 3. A VM's own backup of the system as it is now, restored after changes: exactly the backup comes back.
 printf 'vm kept\n' > /home/tester/vm-keep.txt && chown tester /home/tester/vm-keep.txt

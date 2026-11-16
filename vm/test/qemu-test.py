@@ -1384,14 +1384,17 @@ def proot_restore_test():
     check("proot restore: no unit fails that did not fail before it (round 10, M6)", o.split()[:1] == ["running"] or not new,
           f"{o.strip()} (before: {failed_before.strip() or 'none'})")
     # Round 10 (M6, the cross-engine restore row): the package database names the VM's own kernel and systemd, nothing
-    # is listed twice, and the family's own database check is clean.
+    # is listed twice, and the family's own database check is clean, dependencies included (round 10 review: dpkg
+    # --audit passed a status where breadstick-desktop needed a newer apt and every apt-get install exited 100).
     owns = {"debian": "dpkg -S", "fedora": "rpm -qf", "archlinux": "pacman -Qo"}[DISTRO]
     kfile = "/boot/vmlinuz-$(uname -r)" if DISTRO == "debian" else "/usr/lib/modules/$(uname -r)/vmlinuz"
     pid1 = "$(readlink -f /proc/1/exe)"
     dups = {"debian": "dpkg-query -W -f='${Package}:${Architecture}\\n' | sort | uniq -d",
             "fedora": "rpm -qa --qf '%{NAME}.%{ARCH}\\n' | grep -v -e '^gpg-pubkey' -e '^kernel' | sort | uniq -d",
             "archlinux": "pacman -Qq | sort | uniq -d"}[DISTRO]
-    audit = {"debian": "dpkg --audit", "fedora": "rpm -q --whatprovides /usr/bin/bash >/dev/null", "archlinux": "pacman -Dk >/dev/null"}[DISTRO]
+    audit = {"debian": "dpkg --audit && apt-get -qq check",
+             "fedora": "rpm -q --whatprovides /usr/bin/bash >/dev/null && rpm -Va --nofiles --nodigest --nosignature --noscripts",
+             "archlinux": "pacman -Dk >/dev/null"}[DISTRO]
     o, st = run(f"{owns} {kfile} >/dev/null 2>&1 && echo kernel-owned; p={pid1}; {owns} \"$p\" >/dev/null 2>&1 || "
                 f"{owns} \"${{p#/usr}}\" >/dev/null 2>&1 && echo systemd-owned; echo dups=$({dups} | wc -l); "
                 f"o=$({audit} 2>&1); r=$?; echo audit=$r $(printf '%s' \"$o\" | wc -l)")
