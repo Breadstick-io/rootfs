@@ -50,6 +50,12 @@
 #
 # MANIFEST_DIR (optional): manifest-nix-<arch>[-desktop].json for each image (RootfsDownloader.manifestName for
 # Distro.NIX), for a LOCAL check. Refused under AutoBuild/dist or a mirror.
+#
+# RUN (default nixbake): the name every Docker object this run makes carries, bsl-<RUN>-*: the containers
+# (bsl-<RUN>-bake-<arch>-<pid>, -act, -tar, -verify, -chown, -clean) and the Nix store volume (bsl-<RUN>-store-<host>).
+# All of them are removed when the run ends, the volume included (a store of about 3 GB; KEEP_STORE=1 keeps the
+# volume for the next bake with the same RUN, and says so). The two images it pulls (nixos/nix, debian:trixie) are
+# Docker Hub's and stay.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -73,6 +79,10 @@ OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 STAMP="${STAMP:-$(date -u +%Y%m%d%H%M)}"
 case "$STAMP" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "ERROR: STAMP must be YYYYMMDDHHMM" >&2; exit 1 ;; esac
 LEVEL="${BAKE_ZSTD_LEVEL:-19}"
+RUN="${RUN:-nixbake}"
+case "$RUN" in *[!a-z0-9-]*|''|-*) echo "ERROR: RUN is lowercase letters, digits and -" >&2; exit 1 ;; esac
+case "${KEEP_STORE:-}" in ''|1) ;; *) echo "ERROR: KEEP_STORE is 1 or unset" >&2; exit 1 ;; esac
+VOL="bsl-$RUN-store-$HOST"
 DOCS_LANGS="${DOCS_LANGS:-auto}"
 case "$DOCS_LANGS" in all|trimmed|auto) ;; *) echo "ERROR: DOCS_LANGS is all, trimmed or auto" >&2; exit 1 ;; esac
 case "${OVER_CACHE_LIMIT:-}" in ''|keep) ;; *) echo "ERROR: OVER_CACHE_LIMIT is keep or unset" >&2; exit 1 ;; esac
@@ -95,14 +105,20 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 WORK="$(mktemp -d)"
-C="bsl-r9-nix-bake-$ARCH-$$"
+C="bsl-$RUN-bake-$ARCH-$$"
 cleanup() {
-  docker rm -f "$C" "$C-act" >/dev/null 2>&1 || true
+  docker rm -f "$C" "$C-act" "$C-tar" "$C-verify" "$C-chown" >/dev/null 2>&1 || true
   # A root tree a failed step left is the container's root's (its store folders are 0555): removed in a container.
   if [ -d "$WORK/out/root" ]; then
-    docker run --rm --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/root 2>/dev/null; rm -rf /out/root' >/dev/null 2>&1 || true
+    docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/root 2>/dev/null; rm -rf /out/root' >/dev/null 2>&1 || true
   fi
-  [ -d "$WORK/out" ] && docker run --rm --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'rm -f /out/system-path /out/nixpkgs-path' >/dev/null 2>&1 || true
+  [ -d "$WORK/out" ] && docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'rm -rf /out/system-path /out/nixpkgs-path /out/vm' >/dev/null 2>&1 || true
+  docker rm -f "$C-clean" >/dev/null 2>&1 || true
+  if [ "${KEEP_STORE:-}" = 1 ]; then
+    echo "[bake-nix] the Nix store volume $VOL is kept (KEEP_STORE=1; docker volume rm $VOL removes it)" >&2
+  else
+    docker volume rm -f "$VOL" >/dev/null 2>&1 || true
+  fi
   # The work folder holds the assembled /etc/breadstick/nix (files, folders, relative links; rm never follows one).
   rm -rf --one-file-system "$WORK"
 }
@@ -276,7 +292,7 @@ build_one() {  # $1 = base|desktop, $2 = 1 trimmed; writes $3 (.unchecked)
     -e NIXSYS="$NIXSYS" -e RELEASE="$RELEASE" -e NIXPKGS_URL="$NIXPKGS_URL" -e NIXPKGS_SHA256="$NIXPKGS_SHA256" \
     -e STATE_VERSION="$STATE_VERSION" \
     -v "$WORK/etc-nix:/cfg/etc-nix:ro" -v "$WORK/configuration.nix:/cfg/configuration.nix:ro" \
-    -v "$WORK/step.sh:/step.sh:ro" -v "$OUTV:/out" -v "bsl-r9-nix-store-$HOST:/nix" \
+    -v "$WORK/step.sh:/step.sh:ro" -v "$OUTV:/out" -v "$VOL:/nix" \
     "$NIX_IMAGE" sh /step.sh "$1" "${2:-}"
   docker rm -f "$C" >/dev/null
   log "first activation"
@@ -284,7 +300,7 @@ build_one() {  # $1 = base|desktop, $2 = 1 trimmed; writes $3 (.unchecked)
     -v "$WORK/activate.sh:/activate.sh:ro" -v "$OUTV:/out" "$ACT_IMAGE" sh /activate.sh
   log "writing $(basename "$3")"
   # As root (the tree's files are the container's root's): numeric owner 0, the store's modes kept.
-  docker run --rm --platform "linux/$HOST" -v "$OUTV:/out" -v "bsl-r9-nix-store-$HOST:/nix" "$NIX_IMAGE" \
+  docker run --rm --name "$C-tar" --platform "linux/$HOST" -v "$OUTV:/out" -v "$VOL:/nix" "$NIX_IMAGE" \
     sh -c 'cd /out/root && tar --numeric-owner --owner=0 --group=0 -cf - .' | zstd -q -"$LEVEL" -T0 -o "$3.unchecked"
   zstd -q -t "$3.unchecked"
 }
@@ -302,7 +318,7 @@ check_one() {  # $1 = base|desktop, $2 = tarball
     mv -f "$t" "$2.rejected"; echo "ERROR: $(basename "$2"): $why" >&2; return 1
   fi
   # The store against its own database, in a container with no network (nothing fetched or signed here).
-  docker run --rm --platform "linux/$HOST" --network none -v "$OUTV:/out" -v "bsl-r9-nix-store-$HOST:/nix" "$NIX_IMAGE" \
+  docker run --rm --name "$C-verify" --platform "linux/$HOST" --network none -v "$OUTV:/out" -v "$VOL:/nix" "$NIX_IMAGE" \
     sh -c 'nix-store --store "local?root=/out/root" --verify --check-contents' \
     || { mv -f "$t" "$2.rejected"; echo "ERROR: $(basename "$2"): the store does not verify" >&2; return 1; }
   mv -f "$t" "$2"
@@ -328,9 +344,9 @@ if [ "$WHAT" = vm ]; then
     -e NIXSYS="$NIXSYS" -e RELEASE="$RELEASE" -e NIXPKGS_URL="$NIXPKGS_URL" -e STATE_VERSION="$STATE_VERSION" \
     -v "$WORK/etc-nix:/cfg/etc-nix:ro" -v "$WORK/configuration.nix:/cfg/configuration.nix:ro" \
     -v "$WORK/vm-image.nix:/cfg/vm-image.nix:ro" -v "$WORK/vmstep.sh:/vmstep.sh:ro" -v "$OUTV:/out" \
-    -v "bsl-r9-nix-store-$HOST:/nix" "$NIX_IMAGE" sh /vmstep.sh
+    -v "$VOL:/nix" "$NIX_IMAGE" sh /vmstep.sh
   docker rm -f "$C" >/dev/null
-  docker run --rm --platform "linux/$HOST" -v "$OUTV:/out" "$NIX_IMAGE" sh -c 'chown -R '"$(id -u):$(id -g)"' /out/vm'
+  docker run --rm --name "$C-chown" --platform "linux/$HOST" -v "$OUTV:/out" "$NIX_IMAGE" sh -c 'chown -R '"$(id -u):$(id -g)"' /out/vm'
   cp "$OUTV/vm/vmlinuz" "$OUTV/vm/initrd.img" "$VOUT/"
   log "compressing root.img ($(du -h --apparent-size "$OUTV/vm/root.img" | cut -f1) apparent)"
   zstd -q -T0 -15 "$OUTV/vm/root.img" -o "$VOUT/root.img.zst"
@@ -386,6 +402,5 @@ for f in base desktop; do
   log "Artifact: $T ($(stat -c %s "$T") bytes; system $(cat "$OUTV/system-path"))"
 done
 # The root tree is the container's root's: removed in a container too.
-docker run --rm --platform "linux/$HOST" -v "$OUTV:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/root 2>/dev/null; rm -rf /out/root' || true
-log "The Nix store volume bsl-r9-nix-store-$HOST is kept for the next bake (docker volume rm it to start clean)."
+docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$OUTV:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/root 2>/dev/null; rm -rf /out/root' || true
 log "Nothing was uploaded."

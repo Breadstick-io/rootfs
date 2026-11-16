@@ -11,7 +11,7 @@
 # Checks: bsl-nix boot (machine id, activation, tmpfiles, the setuid wrappers), setup-user.sh and bsl-nix account,
 # sudo -n as the user through the wrapper, add + apply (one package from cache.nixos.org, the only network use), roll
 # back, the same apply through switch-to-configuration against breadstick-systemd and a dbus-daemon inside the proot,
-# and garbage collection. PASS/FAIL lines; any FAIL exits 1. Container bsl-r9-nix-proot-*, removed after; its files
+# and garbage collection. PASS/FAIL lines; any FAIL exits 1. Container bsl-<RUN>-proot-* (RUN, default nixtest), removed after; its files
 # are removed by the container's root.
 set -euo pipefail
 IMG="${1:?image}"
@@ -20,11 +20,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SETUP_USER="${SETUP_USER:-$HERE/../../Android/app/src/main/assets/setup-user.sh}"
 [ -f "$SETUP_USER" ] || { echo "no setup-user.sh: set SETUP_USER" >&2; exit 2; }
 TAG="${TAG:-bsl-proot-host-build:1}"
-C="bsl-r9-nix-proot-$$"
+C="bsl-${RUN:-nixtest}-proot-$$"
 W="$(mktemp -d)"
 cleanup() {
   docker rm -f "$C" >/dev/null 2>&1 || true
-  docker run --rm --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'chmod -R u+w /w/g 2>/dev/null; rm -rf /w/g' >/dev/null 2>&1 || true
+  docker run --rm --name "$C-clean" --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'chmod -R u+w /w/g 2>/dev/null; rm -rf /w/g' >/dev/null 2>&1 || true
   rm -rf "$W"
 }
 trap cleanup EXIT

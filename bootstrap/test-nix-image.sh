@@ -7,8 +7,11 @@
 #
 #   rootfs/bootstrap/test-nix-image.sh /abs/nixos-26.05-arm64-desktop-<stamp>.tar.zst [arm64|amd64]
 #   SETUP_USER=/abs/Android/app/src/main/assets/setup-user.sh   (default: the Android checkout beside this one)
+#   ORDER=session-first (default) | account-first: whether a session started before the account step (it leaves the
+#   bsl-app entry for the app's real uid, 10362 here, as start-desktop-x11.sh does: round 9's F8 path, where the
+#   account got uid 10363) or the account came first (the in-app order; test-nix-session.sh and the gate run it too)
 #
-# Each check prints PASS or FAIL; any FAIL exits 1. Containers and images bsl-r9-nix-test-*, removed after.
+# Each check prints PASS or FAIL; any FAIL exits 1. Containers and images bsl-<RUN>-test-* (RUN, default nixtest), removed after.
 set -euo pipefail
 IMG="${1:?image}"
 ARCH="${2:-arm64}"
@@ -16,12 +19,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SETUP_USER="${SETUP_USER:-$HERE/../../Android/app/src/main/assets/setup-user.sh}"
 [ -f "$SETUP_USER" ] || SETUP_USER="$HERE/../../plan-4.0-android/app/src/main/assets/setup-user.sh"
 [ -f "$SETUP_USER" ] || { echo "no setup-user.sh: set SETUP_USER" >&2; exit 2; }
-T="bsl-r9-nix-test:$ARCH-$$"
-C="bsl-r9-nix-test-$ARCH-$$"
+T="bsl-${RUN:-nixtest}-test:$ARCH-$$"
+C="bsl-${RUN:-nixtest}-test-$ARCH-$$"
 W="$(mktemp -d)"
 cleanup() { docker rm -f "$C" >/dev/null 2>&1 || true; docker rmi -f "$T" >/dev/null 2>&1 || true; rm -rf "$W"; }
 trap cleanup EXIT
 cp "$SETUP_USER" "$W/setup-user.sh"
+ORDER="${ORDER:-session-first}"
+case "$ORDER" in session-first|account-first) printf '%s\n' "$ORDER" > "$W/order" ;; *) echo "ORDER is session-first or account-first" >&2; exit 2 ;; esac
 cat > "$W/run.sh" <<'BSL_NIXTEST_RUN_END'
 #!/bin/sh
 # In the image's own NixOS, as root. PATH as the app gives a Nix system (GuestEnv.NIX_PATH). Docker binds its own
@@ -72,10 +77,22 @@ for p in xfce4-session xfwm4 xfce4-panel xfdesktop xfsettingsd xfce4-terminal th
 done
 check "the desktop's programs" ${miss:-0}
 
-# The app's account step: setup-user.sh (the asset, unchanged), then bsl-nix account.
+# A session before the account (ORDER=session-first): start-desktop-x11.sh's bsl-app entry for the app's real uid.
+if [ "$(cat /t/order)" = session-first ]; then
+  useradd -r -M -N -g nogroup -u 10362 -d /nonexistent -s /run/current-system/sw/bin/nologin -c "Breadstick Linux, the Android app itself" bsl-app
+  check "a session first: bsl-app is uid 10362" $(( $(id -u bsl-app 2>/dev/null || echo 0) != 10362 ))
+fi
+# The app's account step: setup-user.sh (the asset), then bsl-nix account.
 printf 'secret1\n' | sh /t/setup-user.sh tester > /tmp/user.log 2>&1; r=$?
-check "setup-user.sh" $r "$(tail -1 /tmp/user.log)"
+check "setup-user.sh ($(cat /t/order))" $r "$(tail -1 /tmp/user.log)"
 $P/bsl-nix account tester > /tmp/acct.log 2>&1; check "bsl-nix account" $? "$(tail -1 /tmp/acct.log)"
+# F8 and pixeltest finding 5: uid 1000 and a group of its own, gid 1000, whatever came first; local.json has both.
+acct_ok() {  # $1 = when
+  [ "$(id -u tester 2>/dev/null)" = 1000 ] && [ "$(id -g tester 2>/dev/null)" = 1000 ] && [ "$(id -gn tester 2>/dev/null)" = tester ] \
+    && grep -q '"uid": 1000,' /etc/breadstick/nix/local.json && [ -d /home/tester ] && [ -s /etc/sudoers.d/zz-breadstick-admin ]
+  check "the account ($1): tester is uid 1000, gid 1000 (tester), with its home and sudo rule" $? "$(grep '^tester:' /etc/passwd)"
+}
+acct_ok "after the account step"
 [ "$(cat /home/tester/.local/share/keyrings/default 2>/dev/null)" = login ]; check "the user's desktop keyring" $?
 
 o=$(su tester -s /bin/sh -c 'PATH=/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/nix/var/nix/profiles/system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin; sudo -n id -u' 2>&1); [ "$o" = 0 ]; check "sudo -n as the user" $? "$o"
@@ -104,6 +121,8 @@ check "an unfree package is refused" $(( r == 0 )) "$(grep 'vscode' /tmp/bad3.lo
 trimmed=0; grep -q '"imageTrim": true' /etc/breadstick/nix/local.json && trimmed=1
 t $P/bsl-nix install hello > /tmp/apply.log 2>&1; r=$?; check "install hello" $r "$(tail -2 /tmp/apply.log | head -1)"
 [ $r = 0 ] || tail -30 /tmp/apply.log
+! grep -q "UID change\|removing user" /tmp/apply.log; check "the first apply leaves the account's uid alone" $? "$(grep 'UID change\|removing user' /tmp/apply.log | head -1)"
+acct_ok "after the first apply"
 [ "$($P/bsl-nix packages)" = hello ]; check "the page's list" $?
 if [ $trimmed = 1 ]; then
   ! grep -q '"imageTrim": true' /etc/breadstick/nix/local.json && [ -n "$(ls /run/current-system/sw/share/man/man1 2>/dev/null)" ]
@@ -118,6 +137,12 @@ t $P/bsl-nix rollback > /tmp/rb.log 2>&1; check "rollback" $? "$(tail -2 /tmp/rb
 [ "$(readlink /nix/var/nix/profiles/system)" = "$G0" ] && ! command -v hello >/dev/null; check "back on the one before, hello gone" $?
 o=$($P/bsl-nix query hello); echo "$o" | grep -q STATUS; check "query: hello not installed after the rollback" $(( $? == 0 ))
 t $P/bsl-nix rollback 1 > /tmp/rb2.log 2>&1; check "back to generation 1" $? "$(tail -2 /tmp/rb2.log | head -1)"
+# F7: the image's own generation keeps the account (round 9: "removing user 'tester'", then no sudo and no Desktop).
+! grep -q "removing user" /tmp/rb2.log; check "the rollback to the image's generation removes no user" $? "$(grep 'removing user' /tmp/rb2.log | head -1)"
+acct_ok "after the rollback to generation 1"
+o=$(su tester -s /bin/sh -c 'PATH=/run/wrappers/bin:/nix/var/nix/profiles/system/sw/bin; sudo -n id -u' 2>&1); [ "$o" = 0 ]; check "sudo -n as the user on generation 1" $? "$o"
+o=$($P/bsl-nix generations --json); echo "$o" | python3 -c 'import json,sys; g=json.load(sys.stdin); sys.exit(0 if g and all(x.get("keepsAccount") for x in g) else 1)'
+check "every generation keeps the account (generations --json)" $? "$(echo "$o" | head -c 160)"
 # Generation 1 is from before German was filled in: the next start must not build forward again (round 9 review).
 $P/bsl-nix languages > /tmp/lang3.log 2>&1; r=$?
 [ $r = 4 ] && grep -q "rolled back to" /tmp/lang3.log && [ "$(readlink /nix/var/nix/profiles/system)" = system-1-link ]
@@ -149,6 +174,16 @@ t $P/bsl-nix gc 1 > /tmp/gc.log 2>&1; check "gc" $? "$(grep -E 'freed|deleted' /
 # After a clean up the page still works (round 9 review: a gc without nixpkgs' root left nothing to evaluate).
 [ -d "$(readlink -f /etc/breadstick/nix/nixpkgs)" ]; check "nixpkgs survives gc" $?
 $P/bsl-nix add hello > /tmp/add2.log 2>&1 && t $P/bsl-nix apply > /tmp/apply2.log 2>&1; check "add and apply after gc" $? "$(tail -2 /tmp/apply2.log | head -1)"
+# Android 17 refuses /proc/stat to apps, and Nix's garbage collector then warned at every nix command (plan 5.15
+# pixeltest finding 5): an unreadable /proc/stat for the user, as on the Pixel; a login shell sets GC_NPROCS.
+printf 'x' > /tmp/nostat; chmod 000 /tmp/nostat; mount --bind /tmp/nostat /proc/stat
+o=$(su tester -s /bin/sh -c "env -u GC_NPROCS $P/nix-instantiate --eval -E 1+1" 2>&1); echo "$o" | grep -q "GC Warning: Could not open /proc/stat"
+check "the probe: without GC_NPROCS Nix warns about /proc/stat" $? "$(echo "$o" | head -1)"
+o=$(su - tester -c 'nix-instantiate --eval -E 1+1' 2>&1); echo "$o" | grep -q "GC Warning"
+check "a login shell's nix commands do not warn about /proc/stat (GC_NPROCS)" $(( $? == 0 )) "$(echo "$o" | head -1)"
+o=$(su tester -s /bin/sh -c "env -u GC_NPROCS $P/bsl-nix generations" 2>&1); echo "$o" | grep -q "GC Warning"
+check "bsl-nix's own nix commands do not either (it sets GC_NPROCS)" $(( $? == 0 )) "$(echo "$o" | head -1)"
+umount /proc/stat
 echo "fails: $fails"
 exit $fails
 BSL_NIXTEST_RUN_END

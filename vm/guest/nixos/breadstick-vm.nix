@@ -106,7 +106,8 @@ in
       RuntimeMaxUse=32M
     '';
 
-    # files/sudoers: wheel (where the app's user is: breadstick.nix's users.users.<name>) runs anything without a
+    # files/sudoers: wheel (where the VM's account step puts the app's user: VmCommands.userScript's useradd -G wheel;
+    # the account is never a users.users entry, module.nix keeps it at every activation) runs anything without a
     # password, as in the Standard engine.
     security.sudo.wheelNeedsPassword = false;
 

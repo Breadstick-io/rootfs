@@ -14,7 +14,7 @@
 # Checks what the review found broken: /usr/local's shims found by the session (bsl-audio, bsl-notifyd), the notification
 # bridge running, the Breadstick look applied (not stock XFCE), xsetroot and xrdb there, dconf and the keyring
 # reachable (no dconf or gnome-keyring errors), the user's keyring, Breadstick's GTK programs from an `env -i`, and no
-# Python traceback. PASS/FAIL lines; any FAIL exits 1. Container bsl-r9-nix-session-*, removed after; its files are
+# Python traceback. PASS/FAIL lines; any FAIL exits 1. Container bsl-<RUN>-session-* (RUN, default nixtest), removed after; its files are
 # removed by the container's root.
 set -euo pipefail
 IMG="${1:?image}"
@@ -23,11 +23,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SETUP_USER="${SETUP_USER:-$HERE/../../Android/app/src/main/assets/setup-user.sh}"
 [ -f "$SETUP_USER" ] || { echo "no setup-user.sh: set SETUP_USER" >&2; exit 2; }
 TAG="${TAG:-bsl-desk-proot-test:1}"
-C="bsl-r9-nix-session-$$"
+C="bsl-${RUN:-nixtest}-session-$$"
 W="$(mktemp -d)"
 cleanup() {
   docker rm -f "$C" >/dev/null 2>&1 || true
-  docker run --rm --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'chmod -R u+w /w/g 2>/dev/null; rm -rf /w/g' >/dev/null 2>&1 || true
+  docker run --rm --name "$C-clean" --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'chmod -R u+w /w/g 2>/dev/null; rm -rf /w/g' >/dev/null 2>&1 || true
   rm -rf "$W"
 }
 trap cleanup EXIT
@@ -100,6 +100,6 @@ BSL_NIXSESSION_RUN_END
 chmod 755 "$W" "$W/bin" "$W/bin/lib"; chmod 644 "$W"/*.sh "$W/image.tar"; chmod -R a+r "$W/bin/lib"; chmod 755 "$W/bin/proot" "$W/bin/loader"
 # The folder made by the container's root, then the run as the app's uid with no capabilities at all, as an Android app
 # has none (with a container's partial set, gnome-keyring aborts by design; setpriv alone does not drop them).
-docker run --rm --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'mkdir -p /w/g && chown 1010195:1010195 /w/g && chmod 755 /w/g'
+docker run --rm --name "$C-prep" --platform linux/arm64 -v "$W:/w" "$TAG" sh -c 'mkdir -p /w/g && chown 1010195:1010195 /w/g && chmod 755 /w/g'
 docker run --name "$C" --platform linux/arm64 --security-opt seccomp=unconfined --cap-drop ALL --user 1010195:1010195 \
   -e HOME=/w/g -v "$W:/w" "$TAG" sh -c 'mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix; grep CapEff /proc/self/status; exec sh /w/run.sh'
