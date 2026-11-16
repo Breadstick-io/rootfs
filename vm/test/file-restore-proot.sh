@@ -96,7 +96,7 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
           else { p = ""; next }
           if (p == "") next
           t = ""
-          if (l ~ /^(Pre-Depends|Depends|Breaks|Conflicts): /) { t = l; sub(/^[^ ]+ /, "", t); sub(/[ (].*/, "", t); sub(/:.*/, "", t) }
+          if (l ~ /^(PreDepends|Pre-Depends|Depends|Breaks|Conflicts): /) { t = l; sub(/^[^ ]+ /, "", t); sub(/[ (].*/, "", t); sub(/:.*/, "", t) }
           if (p in add) bad[p] = 1
           else if (t in add) bad[t] = 1
         }

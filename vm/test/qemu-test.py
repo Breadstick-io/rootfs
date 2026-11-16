@@ -1403,6 +1403,14 @@ def proot_restore_test():
     check("proot restore: the package database names the VM's own kernel and systemd, nothing twice, its check clean",
           "kernel-owned" in o and "systemd-owned" in o and "dups=0" in o and "audit=0 0" in o,
           o.strip().replace("\n", " | ") + f" (restore: {said})")
+    if DISTRO == "debian":
+        # Round 10 review: a backup with breadstick-systemd (the Standard engine's service manager) comes in without it:
+        # no package, no diversion of the VM's systemctl and the rest, no .distrib left, and real systemd answers.
+        o, st = run("dpkg-query -W -f='${Status}' breadstick-systemd 2>/dev/null | grep -q installed && echo pkg; "
+                    "echo div=$(dpkg-divert --list | grep -c breadstick-systemd); ls /usr/bin/*.distrib /usr/sbin/*.distrib 2>/dev/null; "
+                    "systemctl is-active bsl-vmagent; grep -h 'breadstick-systemd taken out' /var/log/breadstick-vm-restore.log 2>/dev/null")
+        check("proot restore: no breadstick-systemd, its diversions undone, systemd answers", "pkg" not in o.split()
+              and "div=0" in o and ".distrib" not in o and "\nactive" in o, o.strip().replace("\n", " | "))
     power_off(q, " (proot restore done)")
 
 

@@ -2,7 +2,8 @@
 # The cross-engine restore's package database step (file-restore-proot.sh, the app's VmFileBackup.PACKAGE_DB_MERGE),
 # run in a container for each family against made-up packages: a VM package whose dependencies the restored system
 # does not meet is left out, and so is one that needs it; one the system meets is put back; a package that breaks a
-# package of the backup is left out; what the backup itself had broken stays as it was. After the step the family's
+# package of the backup is left out, and so is one a backup package's Pre-Depends asks a newer version of (apt-get check
+# names it `PreDepends:`); what the backup itself had broken stays as it was. After the step the family's
 # own dependency check is clean, or names only what the backup had broken, and the restore's log names each one left out.
 #
 #   vm/test/pkgdb-merge-test.sh [debian] [fedora] [archlinux]     (all three by default)
@@ -29,6 +30,7 @@ st() { printf 'Package: %s\nStatus: install ok installed\nPriority: optional\nAr
 cp /var/lib/dpkg/status /var/lib/dpkg/status.orig
 { cat /var/lib/dpkg/status.orig; echo; st bsltest-oldbroken 'Depends: bsltest-nowhere
 '; st bsltest-picky 'Breaks: bsltest-broken-by-backup
+'; st bsltest-user 'Pre-Depends: bsltest-vmlib (>= 2)
 '; } > /var/lib/dpkg/status
 # The VM's database: the container's own and the VM's packages.
 { cat /var/lib/dpkg/status.orig; echo
@@ -36,10 +38,10 @@ cp /var/lib/dpkg/status /var/lib/dpkg/status.orig
 '; st bsltest-needy 'Depends: apt (>= 99)
 '; st bsltest-chain 'Depends: bsltest-needy
 '; st bsltest-breaker 'Breaks: apt (<< 99)
-'; st bsltest-broken-by-backup ''; st bsltest-nofiles ''; } > $w/dpkg-status
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup; do echo /. > /var/lib/dpkg/info/$p.list; done
+'; st bsltest-broken-by-backup ''; st bsltest-nofiles ''; st bsltest-vmlib ''; } > $w/dpkg-status
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-vmlib; do echo /. > /var/lib/dpkg/info/$p.list; done
 . /m/merge.sh
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-nofiles bsltest-oldbroken; do
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-nofiles bsltest-vmlib bsltest-oldbroken bsltest-user; do
   v=$(dpkg-query -W -f='${Status}' $p 2>/dev/null) || true
   [ "$v" = "install ok installed" ] || v=absent
   printf '%s=%s\n' $p "$v"
@@ -49,19 +51,23 @@ grep '^left out' /var/log/breadstick-vm-restore.log | sort
 BSL_PKGDB_DEB
 
 cat > "$work/debian.want" <<'BSL_PKGDB_DEBW'
-package database (dpkg): the VM's own packages put back: 1, left out: 4
+package database (dpkg): the VM's own packages put back: 1, left out: 5
 bsltest-free=install ok installed
 bsltest-needy=absent
 bsltest-chain=absent
 bsltest-breaker=absent
 bsltest-broken-by-backup=absent
 bsltest-nofiles=absent
+bsltest-vmlib=absent
 bsltest-oldbroken=install ok installed
+bsltest-user=install ok installed
 broken:  bsltest-oldbroken : Depends: bsltest-nowhere but it is not installable
+broken:  bsltest-user : PreDepends: bsltest-vmlib (>= 2) but it is not installable
 left out (dpkg): bsltest-breaker
 left out (dpkg): bsltest-broken-by-backup
 left out (dpkg): bsltest-chain
 left out (dpkg): bsltest-needy
+left out (dpkg): bsltest-vmlib
 BSL_PKGDB_DEBW
 
 cat > "$work/fedora.sh" <<'BSL_PKGDB_FED'
