@@ -136,6 +136,15 @@ done
 mkdir -p "$E/src/breadstick-systemd"
 cp -r "$PKGROOT/breadstick-systemd/src" "$E/src/breadstick-systemd/src"
 cp "$PKGROOT/breadstick-systemd/DESIGN.md" "$E/src/breadstick-systemd/"
+# breadstick-shm and breadstick-gl: their programs and the committed libraries every family ships (overlay.nix picks
+# this architecture's); the architecture's Vulkan driver for native GPU mode, its tarball only (round 11, plan 5.14 P1).
+for d in breadstick-shm breadstick-gl; do
+  mkdir -p "$E/src/$d"
+  cp -r "$PKGROOT/$d/src" "$PKGROOT/$d/prebuilt" "$E/src/$d/"
+done
+case "$ARCH" in arm64) MESA=breadstick-mesa-adreno ;; amd64) MESA=breadstick-mesa-intel ;; esac
+mkdir -p "$E/src/$MESA/prebuilt/$ARCH"
+cp "$PKGROOT/$MESA/prebuilt/$ARCH/$MESA.tar.gz" "$E/src/$MESA/prebuilt/$ARCH/"
 printf '%s\n' "$VERSION" > "$E/src/VERSION"
 cp -r "$ROOT/vm/guest/." "$E/vm-guest/"
 find "$E" \( -name __pycache__ -o -name '*.pyc' -o -name '*.o' \) -prune -exec rm -rf {} +
