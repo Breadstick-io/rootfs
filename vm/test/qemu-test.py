@@ -1823,6 +1823,15 @@ def file_backup_test():
           and not any(x.startswith("tmp/") for x in names),
           f"{len(names)} entries; sudo {oct(sudo.mode) if sudo else None}, keep uid {keep.uid if keep else None} "
           f"xattr {keep.pax_headers.get('SCHILY.xattr.user.breadstick') if keep else None}")
+    # Round 11 (R10-2): a move out of the VM's archive (Android VmFileBackup.TAR_SCRIPT_STRICT, copied in
+    # file-backup-strict.sh) is whole on a running VM: tar's "file changed as we read it" for the mount points /sys,
+    # /proc, /dev and /run, which made every move out of the VM fail on the Pixel, is the only kind it accepts beside
+    # /var/log and sockets.
+    t0 = time.time()
+    st, n = stream_out(open("/t/file-backup-strict.sh").read(), "/dev/null")
+    tl, _ = run("grep -c . /var/log/breadstick-vm-backup.log; head -n 5 /var/log/breadstick-vm-backup.log | tr '\\n' '|'")
+    check("file backup: a move's archive (every file or a failure) is whole on the running VM (R10-2)",
+          st == 0 and n > (50 << 20), f"exit {st}, {n >> 20} MiB in {time.time() - t0:.0f} s; tar's log: {tl.strip()}")
     run("rm -f ~/r9-keep.txt ~/r9-link; echo after > ~/r9-after.txt", user="tester")
     run("echo after > /etc/r9-after.conf; chmod 0700 /var/tmp")
     t0 = time.time()
@@ -2096,9 +2105,11 @@ true"""}[DISTRO]
     apart, _ = run("grep -c '^a version apart (' /var/log/breadstick-vm-restore.log 2>/dev/null || true")
     rec, _ = run("cat /var/lib/breadstick-vm/restore-left-out 2>/dev/null | tr '\\n' ' '")
     print(f"proot restore: a version apart: {apart.strip() or '0'}; left out for the refresh: {rec.strip() or 'none'}", flush=True)
-    # Every package dpkg or rpm left out, and only those, is recorded for the VM's refresh (VmGuestUpdate.reinstallScript).
-    want_rec = sorted(f"{fam} {name}" for fam, name in re.findall(r"left out \((dpkg|rpm)\): (\S+)", left))
-    got_rec = sorted(" ".join(p) for p in zip(rec.split()[0::2], rec.split()[1::2]))
+    # Every package left out, and only those, is recorded (VmGuestUpdate.reinstallScript installs dpkg's and rpm's
+    # again): round 11 (H3) names rpm's by NVRA and pacman's by name, version and processor, in the log and the record.
+    rec_lines, _ = run("cat /var/lib/breadstick-vm/restore-left-out 2>/dev/null")
+    want_rec = sorted(f"{fam} {name}" for fam, name in re.findall(r"left out \((dpkg|rpm|pacman)\): (\S+)", left))
+    got_rec = sorted(" ".join(l.split()[:2]) for l in rec_lines.splitlines() if l.strip())
     check("proot restore: what was left out is recorded for the refresh (round 10, third review)", got_rec == want_rec,
           f"record: {rec.strip()!r}; log: {left.strip()!r}")
 

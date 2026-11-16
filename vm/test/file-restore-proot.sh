@@ -16,6 +16,7 @@ if command -v rpm >/dev/null 2>&1; then
   d=$(rpm -E %_dbpath 2>/dev/null) || d=
   if [ "${d#/}" != "$d" ] && [ -d "$d" ]; then cp -a "$d" "$w/rpmdb"; fi
 fi
+if [ -d /var/lib/pacman/local ]; then mkdir -p "$w/pacdb" && cp -a /var/lib/pacman/local "$w/pacdb/local"; fi
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
 cd "$s"
 tar --create --file=- --format=posix --numeric-owner --xattrs --xattrs-include='*' --exclude-from="$w/mounts" --exclude='./usr/lib/breadstick-vm' --exclude='./etc/systemd/system/bsl-*' --exclude='./etc/systemd/system/*.wants/bsl-*' --exclude='./etc/fstab' --exclude='./etc/modules-load.d/breadstick-vm.conf' --exclude='./etc/systemd/journald.conf.d/breadstick-vm.conf' --exclude='./etc/systemd/zram-generator.conf' --exclude='./etc/profile.d/breadstick-vm.sh' --exclude='./etc/sudoers.d/breadstick-vm' --exclude='./etc/hostname' --exclude='./etc/hosts' --exclude='./etc/resolv.conf' --exclude='./etc/machine-id' . \
@@ -52,12 +53,18 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
   set +e
   ( set -e
     : > "$w/dpkg-add"
-    awk -v info=/var/lib/dpkg/info -v out="$w/dpkg-add" '
+    : > "$w/dpkg-cand"
+    : > "$w/dpkg-nolist"
+    na=$(dpkg --print-architecture 2>/dev/null) || na=
+    awk -v info=/var/lib/dpkg/info -v out="$w/dpkg-add" -v cand="$w/dpkg-cand" -v nolist="$w/dpkg-nolist" -v na="$na" '
       function flush() {
         if (f == 1 && n != "") have[n ":" a] = 1
         if (f == 2 && n != "" && st == "install ok installed" && !((n ":" a) in have) && !((n ":all") in have)) {
+          id = n; if (a != na && a != "all" && a != "") id = n ":" a
           l1 = info "/" n ".list"; l2 = info "/" n ":" a ".list"
-          if ((getline x < l1) > 0 || (getline x < l2) > 0) { printf "%s\n", buf > out; k++ }
+          if ((getline x < l1) > 0) { printf "%s\n", buf > out; printf "%s:%s\t%s\t%s\n", n, a, l1, id > cand; k++ }
+          else if ((getline x < l2) > 0) { printf "%s\n", buf > out; printf "%s:%s\t%s\t%s\n", n, a, l2, id > cand; k++ }
+          else printf "%s\n", id > nolist
           close(l1); close(l2)
         }
         n = ""; a = ""; st = ""; buf = ""
@@ -75,10 +82,37 @@ if [ -s "$w/dpkg-status" ] && [ -f /var/lib/dpkg/status ]; then
         -o Dir::Cache::srcpkgcache= -o Debug::NoLocking=1 > "$2" 2>&1
     }
     o=0
-    bsl_out() { awk '/^Package: / { print $2 }' "$1" | bsl_left; }
+    bsl_out() {
+      awk -v na="$na" 'function p() { if (n != "") { if (a != na && a != "all" && a != "") n = n ":" a; print n } n = ""; a = "" }
+        /^Package: / { p(); n = $2 } /^Architecture: / { a = $2 } END { p() }' "$1" | bsl_left
+    }
     bsl_left() { tee -a "$w/left-dpkg" | sed 's/^/left out (dpkg): /' >>/var/log/breadstick-vm-restore.log; }
+    # Each one judged by its own file list (round 11, H3): a package the VM installed after its image (a second kernel)
+    # lost the files the restore took away, and its list with them; neither is put back silently.
+    t=$(printf '\t')
+    : > "$w/dpkg-miss"
+    while IFS="$t" read -r pa lp id; do
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if [ ! -e "$p" ] && [ ! -L "$p" ]; then printf '%s\t%s\n' "$pa" "$id" >> "$w/dpkg-miss"; break; fi
+      done < "$lp"
+    done < "$w/dpkg-cand"
+    if [ -s "$w/dpkg-miss" ]; then
+      awk -v miss="$w/dpkg-miss" '
+        BEGIN { while ((getline x < miss) > 0) { sub(/\t.*/, "", x); b[x] = 1 } RS = ""; ORS = "\n\n" }
+        { n = ""; a = ""; c = split($0, L, "\n")
+          for (j = 1; j <= c; j++) { if (L[j] ~ /^Package: /) n = substr(L[j], 10); if (L[j] ~ /^Architecture: /) a = substr(L[j], 15) }
+          if (!((n ":" a) in b)) print }' "$w/dpkg-add" > "$w/dpkg-add.1"
+      mv -f "$w/dpkg-add.1" "$w/dpkg-add"
+      cut -f 2 "$w/dpkg-miss" | bsl_left
+      o=$((o + $(wc -l < "$w/dpkg-miss")))
+    fi
+    if [ -s "$w/dpkg-nolist" ]; then
+      bsl_left < "$w/dpkg-nolist"
+      o=$((o + $(wc -l < "$w/dpkg-nolist")))
+    fi
     if [ -s "$w/dpkg-add" ] && ! command -v apt-get >/dev/null 2>&1; then
-      o=$(bsl_count "$w/dpkg-add")
+      o=$((o + $(bsl_count "$w/dpkg-add")))
       bsl_out "$w/dpkg-add"
       : > "$w/dpkg-add"
     fi
@@ -144,20 +178,32 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
     rpm -qa --qf '%{NAME}.%{ARCH}\n' 2>/dev/null | sort -u > "$w/rpm-have"
     rpm --dbpath "$w/rpmdb" -qa --qf '%{NAME}.%{ARCH}\t%{NAME}-%{VERSION}-%{RELEASE}%|ARCH?{.%{ARCH}}:{}|\n' 2>/dev/null | sort -u > "$w/rpm-vm"
     : > "$w/rpm-add"
-    cut -f 1 "$w/rpm-vm" | grep -v '^gpg-pubkey[.]' | sort -u | comm -13 "$w/rpm-have" - | while IFS= read -r pk; do
-      rpm --dbpath "$w/rpmdb" -q --qf '[%{FILESTATES:fstate} f%{FILEFLAGS:fflags} %{FILENAMES}\n]' "$pk" > "$w/rpm-files" 2>/dev/null || continue
+    : > "$w/rpm-miss"
+    # Each installed package of a name the restored database lacks, by its own NVRA (round 11, H3): a VM that updated
+    # keeps two kernels (installonly_limit), and the one installed after the image lost files the restore took away;
+    # the other is whole and stays.
+    awk -F '\t' 'FILENAME == ARGV[1] { have[$0] = 1; next } !($1 in have) && $1 !~ /^gpg-pubkey[.]/ { print $2 }' "$w/rpm-have" "$w/rpm-vm" \
+      | while IFS= read -r pv; do
+      if ! rpm --dbpath "$w/rpmdb" -q --qf '[%{FILESTATES:fstate} f%{FILEFLAGS:fflags} %{FILENAMES}\n]' "$pv" > "$w/rpm-files" 2>/dev/null; then
+        printf '%s\n' "$pv" >> "$w/rpm-miss"
+        continue
+      fi
       fs=
       while read -r fs ff fp; do
         [ "$fs" = normal ] || continue
         case "$ff" in *g*|*m*) continue ;; esac
         [ -e "$fp" ] || [ -L "$fp" ] || { fs=missing; break; }
       done < "$w/rpm-files"
-      [ "$fs" = missing ] || printf '%s\n' "$pk" >> "$w/rpm-add"
+      if [ "$fs" = missing ]; then printf '%s\n' "$pv" >> "$w/rpm-miss"; else printf '%s\n' "$pv" >> "$w/rpm-add"; fi
     done
     o=0
+    if [ -s "$w/rpm-miss" ]; then
+      tee -a "$w/left-rpm" < "$w/rpm-miss" | sed 's/^/left out (rpm): /' >>/var/log/breadstick-vm-restore.log
+      o=$(wc -l < "$w/rpm-miss")
+    fi
     if [ -s "$w/rpm-add" ]; then
       rpm -Va --nofiles --nodigest --nosignature --noscripts > "$w/rpm-v0" 2>&1 || true
-      awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next } !($1 in add) { print $2 }' "$w/rpm-add" "$w/rpm-vm" > "$w/rpm-drop"
+      awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next } !($2 in add) { print $2 }' "$w/rpm-add" "$w/rpm-vm" > "$w/rpm-drop"
       [ ! -s "$w/rpm-drop" ] || xargs rpm --dbpath "$w/rpmdb" -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-drop" 2>>/var/log/breadstick-vm-restore.log
       rpmdb --dbpath "$w/rpmdb" --exportdb | rpmdb --importdb
       i=0
@@ -173,7 +219,7 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
           if rpm -q --whatprovides "$c" >/dev/null 2>&1; then printf '%s\n' "$c" >> "$w/rpm-caps"; fi
         done < "$w/rpm-vcaps"
         awk -F '\t' 'FILENAME == ARGV[1] { add[$0] = 1; next }
-          FILENAME == ARGV[2] { if ($1 in add) key[$2] = $1; next }
+          FILENAME == ARGV[2] { if ($2 in add) key[$2] = $2; next }
           FILENAME == ARGV[3] { cap[$0] = 1; next }
           FILENAME == ARGV[4] { if ($0 ~ /^Unsatisfied dependencies for .*:$/) h = $0; else old[h "\n" $0] = 1; next }
           /^Unsatisfied dependencies for .*:$/ { h = $0; x = substr($0, 30, length($0) - 30); sub(/-[0-9]+:/, "-", x); k = (x in key) ? key[x] : ""; next }
@@ -189,15 +235,21 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
           if ! grep -q '^other' "$w/rpm-why"; then grep '^apart' "$w/rpm-why" | sort -u > "$w/rpm-apart" || true; break; fi
           cp "$w/rpm-add" "$w/rpm-bad"
         elif [ "$i" -gt 50 ]; then cp "$w/rpm-add" "$w/rpm-bad"; fi
-        awk -F '\t' 'FILENAME == ARGV[1] { b[$0] = 1; next } ($1 in b) { print $2 }' "$w/rpm-bad" "$w/rpm-vm" \
-          | xargs rpm -e --justdb --nodeps --noscripts --notriggers --allmatches 2>>/var/log/breadstick-vm-restore.log
+        xargs rpm -e --justdb --nodeps --noscripts --notriggers --allmatches < "$w/rpm-bad" 2>>/var/log/breadstick-vm-restore.log
         grep -vxF -f "$w/rpm-bad" "$w/rpm-add" > "$w/rpm-add.1" || true
         tee -a "$w/left-rpm" < "$w/rpm-bad" | sed 's/^/left out (rpm): /' >>/var/log/breadstick-vm-restore.log
         o=$((o + $(wc -l < "$w/rpm-bad")))
         mv -f "$w/rpm-add.1" "$w/rpm-add"
       done
     fi
-    [ ! -s "$w/left-rpm" ] || sort -u "$w/left-rpm" | sed 's/^/rpm /' >> /var/lib/breadstick-vm/restore-left-out
+    # The record: `rpm <NVRA> <NAME.ARCH>`, installed again by name; only `rpm <NVRA>` when another version of that
+    # name stays (a kernel's second version: that one again, never a downgrade of the kept one).
+    if [ -s "$w/left-rpm" ]; then
+      sort -u "$w/left-rpm" > "$w/left-rpm.1"
+      awk -F '\t' 'FILENAME == ARGV[1] { na[$2] = $1; next } FILENAME == ARGV[2] { k[na[$0]] = 1; next }
+        { if (($0 in na) && !(na[$0] in k)) print "rpm " $0 " " na[$0]; else print "rpm " $0 }' \
+        "$w/rpm-vm" "$w/rpm-add" "$w/left-rpm.1" >> /var/lib/breadstick-vm/restore-left-out
+    fi
     echo "package database (rpm): the VM's own packages put back: $(wc -l < "$w/rpm-add"), left out: $o"
     if [ -s "$w/rpm-apart" ]; then
       cut -f 2,3 "$w/rpm-apart" | sed 's/\t/ needs /; s/^/a version apart (rpm): /' >>/var/log/breadstick-vm-restore.log
@@ -214,14 +266,52 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
     for e in "$s"/var/lib/pacman/local/*/desc; do
       [ ! -f "$e" ] || awk '/^%NAME%$/ { getline; print; exit }' "$e"
     done | sort -u > "$w/pac-have"
+    t=$(printf '\t')
+    bsl_pac_id() { awk '/^%NAME%$/ { getline; n = $0 } /^%VERSION%$/ { getline; v = $0 } /^%ARCH%$/ { getline; a = $0 }
+      END { printf "%s\t%s-%s-%s\n", n, n, v, a }' "$1"; }
     : > "$w/pac-kept"
     for d in /var/lib/pacman/local/*/; do
       d=${d%/}
       [ -f "$d/desc" ] && [ ! -e "$s$d" ] || continue
-      pn=$(awk '/^%NAME%$/ { getline; print; exit }' "$d/desc")
-      if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else printf '%s\t%s\n' "$pn" "$d" >> "$w/pac-kept"; fi
+      id=$(bsl_pac_id "$d/desc")
+      pn=${id%%"$t"*}
+      if [ -n "$pn" ] && grep -qxF -e "$pn" "$w/pac-have"; then rm -rf "$d"; else printf '%s\t%s\t%s\n' "$pn" "$d" "${id#*"$t"}" >> "$w/pac-kept"; fi
     done
     o=0
+    # The VM's entries the restore took away with the files it took (round 11, H3: a kernel installed after the image),
+    # from the copy kept before it, each by its own name, version and processor: put back when every file it lists is
+    # there, else left out and named.
+    : > "$w/pac-miss"
+    if [ -d "$w/pacdb/local" ]; then
+      for e in "$w"/pacdb/local/*/; do
+        e=${e%/}
+        b=${e##*/}
+        [ -f "$e/desc" ] || continue
+        [ ! -e "/var/lib/pacman/local/$b" ] && [ ! -e "$s/var/lib/pacman/local/$b" ] || continue
+        id=$(bsl_pac_id "$e/desc")
+        pn=${id%%"$t"*}
+        [ -n "$pn" ] || continue
+        if grep -qxF -e "$pn" "$w/pac-have" || cut -f 1 "$w/pac-kept" | grep -qxF -e "$pn"; then continue; fi
+        m=
+        if [ -f "$e/files" ]; then
+          awk '/^%FILES%$/ { on = 1; next } /^$/ { on = 0 } on' "$e/files" > "$w/pac-files"
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            [ -e "/$p" ] || [ -L "/$p" ] || { m=1; break; }
+          done < "$w/pac-files"
+        fi
+        if [ -n "$m" ]; then
+          printf '%s\n' "${id#*"$t"}" >> "$w/pac-miss"
+        else
+          cp -a "$e" "/var/lib/pacman/local/$b"
+          printf '%s\t%s\t%s\n' "$pn" "/var/lib/pacman/local/$b" "${id#*"$t"}" >> "$w/pac-kept"
+        fi
+      done
+    fi
+    if [ -s "$w/pac-miss" ]; then
+      tee -a "$w/left-pac" < "$w/pac-miss" | sed 's/^/left out (pacman): /' >>/var/log/breadstick-vm-restore.log
+      o=$(wc -l < "$w/pac-miss")
+    fi
     : > "$w/pac-apart"
     if [ -s "$w/pac-kept" ]; then
       mkdir -p "$w/pacdb0" "$w/pac-out"
@@ -259,12 +349,15 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
           cp "$w/pac-kept" "$w/pac-bad"
         elif [ "$i" -gt 50 ]; then cp "$w/pac-kept" "$w/pac-bad"; fi
         cut -f 2 "$w/pac-bad" | while IFS= read -r d; do mv "$d" "$w/pac-out/"; done
-        cut -f 1 "$w/pac-bad" | sed 's/^/left out (pacman): /' >>/var/log/breadstick-vm-restore.log
+        cut -f 3 "$w/pac-bad" | tee -a "$w/left-pac" | sed 's/^/left out (pacman): /' >>/var/log/breadstick-vm-restore.log
         awk -F '\t' 'FILENAME == ARGV[1] { b[$1] = 1; next } !($1 in b)' "$w/pac-bad" "$w/pac-kept" > "$w/pac-kept.1"
         o=$((o + $(wc -l < "$w/pac-bad")))
         mv -f "$w/pac-kept.1" "$w/pac-kept"
       done
     fi
+    # Recorded like dpkg's and rpm's (`pacman <name>-<version>-<processor>`); Arch never syncs by itself, so nothing
+    # installs them but the user's own update.
+    [ ! -s "$w/left-pac" ] || sort -u "$w/left-pac" | sed 's/^/pacman /' >> /var/lib/breadstick-vm/restore-left-out
     echo "package database (pacman): the VM's own packages kept: $(wc -l < "$w/pac-kept"), left out: $o"
     if [ -s "$w/pac-apart" ]; then
       cut -f 2,3 "$w/pac-apart" | sed 's/\t/ needs /; s/^/a version apart (pacman): /' >>/var/log/breadstick-vm-restore.log

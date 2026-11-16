@@ -1,7 +1,7 @@
 f=/var/lib/breadstick-vm/restore-left-out
 [ -s "$f" ] || exit 0
 n=
-for p in $(awk '$1 == "rpm" { print $2 }' "$f"); do rpm -q "$p" >/dev/null 2>&1 || n="$n $p"; done
+for p in $(awk '$1 == "rpm" { print ($3 != "" ? $3 : $2) }' "$f" | sort -u); do rpm -q "$p" >/dev/null 2>&1 || n="$n $p"; done
 if [ -n "$n" ]; then
   echo "the VM's own packages the restore left out, installed again:$n"
   dnf -y install --setopt=install_weak_deps=False --skip-unavailable $n || exit $?

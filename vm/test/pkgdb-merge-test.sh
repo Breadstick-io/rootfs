@@ -8,6 +8,10 @@
 # rpm and pacman (round 10, third review) keep a VM package whose only unmet need is a version of something the system
 # has (the VM's systemd pinning the image's systemd-libs), and one that needs it; the log says so. Every package dpkg and
 # rpm leave out is in the record the VM's refresh installs again (/var/lib/breadstick-vm/restore-left-out).
+# Round 11 (H3): two kernels in each family, the second installed after the image and missing a file the restore took
+# away. Each installed package is judged on its own (rpm by NVRA, pacman by name, version and processor, dpkg by its
+# file list): the whole kernel stays, the other is left out, and every package left out is named in the log and the
+# record, a package with no file list (dpkg) or whose entry the restore took away (pacman) included.
 #
 #   vm/test/pkgdb-merge-test.sh [debian] [fedora] [archlinux]     (all three by default)
 #
@@ -41,10 +45,19 @@ cp /var/lib/dpkg/status /var/lib/dpkg/status.orig
 '; st bsltest-needy 'Depends: apt (>= 99)
 '; st bsltest-chain 'Depends: bsltest-needy
 '; st bsltest-breaker 'Breaks: apt (<< 99)
-'; st bsltest-broken-by-backup ''; st bsltest-nofiles ''; st bsltest-vmlib ''; } > $w/dpkg-status
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-vmlib; do echo /. > /var/lib/dpkg/info/$p.list; done
+'; st bsltest-broken-by-backup ''; st bsltest-nofiles ''; st bsltest-vmlib ''
+  # Two kernels: the image's, whole, and the one installed after it, missing a file; a package that needs the second;
+  # a foreign package whose list the restore took away.
+  st bsltest-kernel-1 ''; st bsltest-kernel-2 ''; st bsltest-kernel-meta 'Depends: bsltest-kernel-2
+'; st bsltest-foreign '' | sed 's/^Architecture: all$/Architecture: i386/'; } > $w/dpkg-status
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-vmlib bsltest-kernel-meta; do echo /. > /var/lib/dpkg/info/$p.list; done
+mkdir -p /usr/lib/bsltest-kernel-1
+echo k > /usr/lib/bsltest-kernel-1/vmlinuz
+printf '/.\n/usr/lib/bsltest-kernel-1\n/usr/lib/bsltest-kernel-1/vmlinuz\n' > /var/lib/dpkg/info/bsltest-kernel-1.list
+printf '/.\n/usr/lib/bsltest-kernel-2\n/usr/lib/bsltest-kernel-2/vmlinuz\n' > /var/lib/dpkg/info/bsltest-kernel-2.list
 . /m/merge.sh
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-nofiles bsltest-vmlib bsltest-oldbroken bsltest-user; do
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-breaker bsltest-broken-by-backup bsltest-nofiles bsltest-vmlib bsltest-oldbroken bsltest-user \
+  bsltest-kernel-1 bsltest-kernel-2 bsltest-kernel-meta; do
   v=$(dpkg-query -W -f='${Status}' $p 2>/dev/null) || true
   [ "$v" = "install ok installed" ] || v=absent
   printf '%s=%s\n' $p "$v"
@@ -55,7 +68,7 @@ sed 's/^/record: /' /var/lib/breadstick-vm/restore-left-out
 BSL_PKGDB_DEB
 
 cat > "$work/debian.want" <<'BSL_PKGDB_DEBW'
-package database (dpkg): the VM's own packages put back: 1, left out: 5
+package database (dpkg): the VM's own packages put back: 2, left out: 9
 bsltest-free=install ok installed
 bsltest-needy=absent
 bsltest-chain=absent
@@ -65,17 +78,28 @@ bsltest-nofiles=absent
 bsltest-vmlib=absent
 bsltest-oldbroken=install ok installed
 bsltest-user=install ok installed
+bsltest-kernel-1=install ok installed
+bsltest-kernel-2=absent
+bsltest-kernel-meta=absent
 broken:  bsltest-oldbroken : Depends: bsltest-nowhere but it is not installable
 broken:  bsltest-user : PreDepends: bsltest-vmlib (>= 2) but it is not installable
 left out (dpkg): bsltest-breaker
 left out (dpkg): bsltest-broken-by-backup
 left out (dpkg): bsltest-chain
+left out (dpkg): bsltest-foreign:i386
+left out (dpkg): bsltest-kernel-2
+left out (dpkg): bsltest-kernel-meta
 left out (dpkg): bsltest-needy
+left out (dpkg): bsltest-nofiles
 left out (dpkg): bsltest-vmlib
 record: dpkg bsltest-breaker
 record: dpkg bsltest-broken-by-backup
 record: dpkg bsltest-chain
+record: dpkg bsltest-foreign:i386
+record: dpkg bsltest-kernel-2
+record: dpkg bsltest-kernel-meta
 record: dpkg bsltest-needy
+record: dpkg bsltest-nofiles
 record: dpkg bsltest-vmlib
 BSL_PKGDB_DEBW
 
@@ -93,23 +117,33 @@ mk() { # name version requires...
 }
 mk bsltest-base 1; mk bsltest-base 2; mk bsltest-free 1 rpm; mk bsltest-needy 1 'bsltest-base >= 2'; mk bsltest-chain 1 bsltest-needy
 mk bsltest-oldbroken 1 bsltest-nowhere; mk bsltest-pinned 1 'bsltest-base = 2-1'; mk bsltest-missing 1 bsltest-absent
-mk bsltest-chain2 1 bsltest-missing
+mk bsltest-chain2 1 bsltest-missing; mk bsltest-gone 1
+mkk() { # a kernel: version, its own file
+  { printf 'Name: bsltest-kernel\nVersion: %s\nRelease: 1\nSummary: t\nLicense: none\nBuildArch: noarch\n' "$1"
+    printf '%%description\nt\n%%install\nmkdir -p %%{buildroot}/usr/lib/bsltest-kernel-%s\necho %s > %%{buildroot}/usr/lib/bsltest-kernel-%s/vmlinuz\n' "$1" "$1" "$1"
+    printf '%%files\n/usr/lib/bsltest-kernel-%s/vmlinuz\n' "$1"
+  } > /tmp/b/bsltest-kernel-$1.spec
+  rpmbuild -bb --quiet --define "_topdir /tmp/b" --define "_rpmdir /tmp/b/out" /tmp/b/bsltest-kernel-$1.spec >/dev/null 2>&1
+}
+mkk 1; mkk 2
 o=/tmp/b/out/noarch
 # The restored (backup's) database: the container's own, base 1 and a package it had broken already. The VM's
 # packages' files are on the disk (they are the image's), not in the restored database.
 rpm -i --nodeps --nosignature $o/bsltest-base-1-1.noarch.rpm $o/bsltest-oldbroken-1-1.noarch.rpm $o/bsltest-free-1-1.noarch.rpm \
   $o/bsltest-needy-1-1.noarch.rpm $o/bsltest-chain-1-1.noarch.rpm $o/bsltest-pinned-1-1.noarch.rpm $o/bsltest-missing-1-1.noarch.rpm \
-  $o/bsltest-chain2-1-1.noarch.rpm
+  $o/bsltest-chain2-1-1.noarch.rpm $o/bsltest-gone-1-1.noarch.rpm $o/bsltest-kernel-1-1.noarch.rpm $o/bsltest-kernel-2-1.noarch.rpm
+# The second kernel and bsltest-gone lost a file the restore took away.
+rm -f /usr/lib/bsltest-kernel-2/vmlinuz /usr/share/bsltest/bsltest-gone
 d=$(rpm -E %_dbpath)
 cp -a "$d" /tmp/vmdb
-rpm -e --justdb --nodeps bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2
+rpm -e --justdb --nodeps --allmatches bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-gone bsltest-kernel
 # The VM's database: the container's own, base 2 and the three.
 rpm --dbpath /tmp/vmdb -e --justdb --nodeps bsltest-oldbroken bsltest-base
 rpm --dbpath /tmp/vmdb -i --justdb --nodeps --nosignature $o/bsltest-base-2-1.noarch.rpm
 cp -a /tmp/vmdb $w/rpmdb
 . /m/merge.sh
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-base bsltest-oldbroken; do
-  v=$(rpm -q $p 2>/dev/null) || v=absent; printf '%s=%s\n' $p "$v"
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-base bsltest-oldbroken bsltest-gone bsltest-kernel; do
+  if v=$(rpm -q $p 2>/dev/null); then v=$(printf '%s' "$v" | tr '\n' ' '); else v=absent; fi; printf '%s=%s\n' $p "$v"
 done
 rpm -Va --nofiles --nodigest --nosignature --noscripts 2>&1 | sed 's/^/broken: /' || true
 grep -e '^left out' -e '^a version apart' /var/log/breadstick-vm-restore.log | sort
@@ -117,7 +151,7 @@ sed 's/^/record: /' /var/lib/breadstick-vm/restore-left-out
 BSL_PKGDB_FED
 
 cat > "$work/fedora.want" <<'BSL_PKGDB_FEDW'
-package database (rpm): the VM's own packages put back: 4, left out: 2
+package database (rpm): the VM's own packages put back: 5, left out: 4
 package database (rpm): a version apart from the system's (the next full upgrade levels them): 2
 bsltest-free=bsltest-free-1-1.noarch
 bsltest-needy=bsltest-needy-1-1.noarch
@@ -127,31 +161,38 @@ bsltest-missing=absent
 bsltest-chain2=absent
 bsltest-base=bsltest-base-1-1.noarch
 bsltest-oldbroken=bsltest-oldbroken-1-1.noarch
+bsltest-gone=absent
+bsltest-kernel=bsltest-kernel-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-oldbroken-1-1.noarch:
 broken: 	bsltest-nowhere is needed by (installed) bsltest-oldbroken-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-needy-1-1.noarch:
 broken: 	bsltest-base >= 2 is needed by (installed) bsltest-needy-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-pinned-1-1.noarch:
 broken: 	bsltest-base = 2-1 is needed by (installed) bsltest-pinned-1-1.noarch
-a version apart (rpm): bsltest-needy.noarch needs bsltest-base >= 2
-a version apart (rpm): bsltest-pinned.noarch needs bsltest-base = 2-1
-left out (rpm): bsltest-chain2.noarch
-left out (rpm): bsltest-missing.noarch
-record: rpm bsltest-chain2.noarch
-record: rpm bsltest-missing.noarch
+a version apart (rpm): bsltest-needy-1-1.noarch needs bsltest-base >= 2
+a version apart (rpm): bsltest-pinned-1-1.noarch needs bsltest-base = 2-1
+left out (rpm): bsltest-chain2-1-1.noarch
+left out (rpm): bsltest-gone-1-1.noarch
+left out (rpm): bsltest-kernel-2-1.noarch
+left out (rpm): bsltest-missing-1-1.noarch
+record: rpm bsltest-chain2-1-1.noarch bsltest-chain2.noarch
+record: rpm bsltest-gone-1-1.noarch bsltest-gone.noarch
+record: rpm bsltest-kernel-2-1.noarch
+record: rpm bsltest-missing-1-1.noarch bsltest-missing.noarch
 BSL_PKGDB_FEDW
 
 cat > "$work/archlinux.sh" <<'BSL_PKGDB_ARCH'
 set -e
 LC_ALL=C; export LC_ALL
-w=/work; s=/stage; mkdir -p $w $s/usr $s/etc $s/var/lib/pacman
+w=/work; s=/stage; mkdir -p $w $s/usr $s/etc $s/var/lib/pacman /var/lib/breadstick-vm
 l=/var/lib/pacman/local
-entry() { # dir name depends conflicts [version]
-  mkdir -p $l/$1
+entry() { # dir name depends conflicts [version [database [files]]]
+  e=${6:-$l}/$1
+  mkdir -p $e
   { printf '%%NAME%%\n%s\n\n%%VERSION%%\n%s\n\n%%ARCH%%\nany\n\n' "$2" "${5:-1-1}"
     [ -z "$3" ] || printf '%%DEPENDS%%\n%s\n\n' "$3"
-    [ -z "$4" ] || printf '%%CONFLICTS%%\n%s\n\n' "$4"; } > $l/$1/desc
-  printf '%%FILES%%\n\n' > $l/$1/files
+    [ -z "$4" ] || printf '%%CONFLICTS%%\n%s\n\n' "$4"; } > $e/desc
+  printf '%%FILES%%\n%s\n' "${7:-}" > $e/files
 }
 # The restored (backup's) database: the container's own, a package it had broken already, and one that conflicts
 # with a VM one. The stage holds the backup's entries.
@@ -169,17 +210,33 @@ entry bsltest-chain-1-1 bsltest-chain 'bsltest-needy' ''
 entry bsltest-conflicted-1-1 bsltest-conflicted '' ''
 entry bsltest-pinned-1-1 bsltest-pinned 'bsltest-lib=1-1' ''
 entry bsltest-pinchain-1-1 bsltest-pinchain 'bsltest-pinned' ''
+# The VM's database before the restore: all of the above, and two kernels the VM installed after its image, whose
+# entries the restore took away with the files no list named: one whose files are all there, one missing its kernel.
+mkdir -p $w/pacdb
+cp -a $l $w/pacdb/local
+mkdir -p /usr/lib/bsltest-linux-2
+echo k > /usr/lib/bsltest-linux-2/vmlinuz
+entry bsltest-linux-2-1 bsltest-linux '' '' 2-1 $w/pacdb/local 'usr/
+usr/lib/
+usr/lib/bsltest-linux-2/
+usr/lib/bsltest-linux-2/vmlinuz
+'
+entry bsltest-linux-lts-1-1 bsltest-linux-lts '' '' 1-1 $w/pacdb/local 'usr/
+usr/lib/bsltest-linux-lts/
+usr/lib/bsltest-linux-lts/vmlinuz
+'
 . /m/merge.sh
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-conflicted bsltest-pinned bsltest-pinchain bsltest-lib bsltest-oldbroken bsltest-picky; do
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-conflicted bsltest-pinned bsltest-pinchain bsltest-lib bsltest-oldbroken bsltest-picky \
+  bsltest-linux bsltest-linux-lts; do
   printf '%s=%s\n' $p "$(pacman -Q $p 2>/dev/null || echo absent)"
 done
 pacman -Dk 2>&1 | grep -v "^warning: database file for '.*' does not exist" | sed 's/^/broken: /' || true
 grep -e '^left out' -e '^a version apart' /var/log/breadstick-vm-restore.log | sort
-[ ! -e /var/lib/breadstick-vm/restore-left-out ] || echo "a record, which only dpkg and rpm write"
+sed 's/^/record: /' /var/lib/breadstick-vm/restore-left-out
 BSL_PKGDB_ARCH
 
 cat > "$work/archlinux.want" <<'BSL_PKGDB_ARCHW'
-package database (pacman): the VM's own packages kept: 3, left out: 3
+package database (pacman): the VM's own packages kept: 4, left out: 4
 package database (pacman): a version apart from the system's (the next full upgrade levels them): 1
 bsltest-free=bsltest-free 1-1
 bsltest-needy=absent
@@ -190,12 +247,19 @@ bsltest-pinchain=bsltest-pinchain 1-1
 bsltest-lib=bsltest-lib 2-1
 bsltest-oldbroken=bsltest-oldbroken 1-1
 bsltest-picky=bsltest-picky 1-1
+bsltest-linux=bsltest-linux 2-1
+bsltest-linux-lts=absent
 broken: error: missing 'bsltest-nowhere' dependency for 'bsltest-oldbroken'
 broken: error: missing 'bsltest-lib=1-1' dependency for 'bsltest-pinned'
 a version apart (pacman): bsltest-pinned needs bsltest-lib=1-1
-left out (pacman): bsltest-chain
-left out (pacman): bsltest-conflicted
-left out (pacman): bsltest-needy
+left out (pacman): bsltest-chain-1-1-any
+left out (pacman): bsltest-conflicted-1-1-any
+left out (pacman): bsltest-linux-lts-1-1-any
+left out (pacman): bsltest-needy-1-1-any
+record: pacman bsltest-chain-1-1-any
+record: pacman bsltest-conflicted-1-1-any
+record: pacman bsltest-linux-lts-1-1-any
+record: pacman bsltest-needy-1-1-any
 BSL_PKGDB_ARCHW
 
 fails=0
