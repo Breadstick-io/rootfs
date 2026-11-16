@@ -677,14 +677,29 @@ files_test()
 
 # ----------------------------------------------------------------------------- ways in (plan 5.14 V13, V18)
 # Each check below is named "parity: ..." for AutoBuild test/parity-gate.py, which reads them per distribution. Every
-# command the VM runs here is the app's own text (rootfs vm/test/*.sh, which Android's VmInboundTest checks are copies).
+# command the VM runs here is the app's own text: rootfs vm/test/<name>, a byte copy of Android's
+# app/src/test/resources/vm/<name>, which VmInboundTest checks is the app's text. app_text() prints each one's sha256
+# ("SCRIPT <name> <sha256>"), and the parity gate's "same" evidence checks it against Android's copy, so a stale copy
+# here fails the cells it backs.
+
+_SCRIPTS = {}
+
+
+def app_text(name):
+    b = open("/t/" + name, "rb").read()
+    if name not in _SCRIPTS:
+        import hashlib
+        _SCRIPTS[name] = hashlib.sha256(b).hexdigest()
+        print(f"SCRIPT {name} {_SCRIPTS[name]}", flush=True)
+    return b.decode()
+
 
 def hangup(ch):
     """What the app's closing of a channel is to the agent: shut down first, since Linux keeps a socket open under the
     reader thread's blocked recv() (as files_test does)."""
     import socket as so
     try:
-        ch.s.shutdown(so.SHUT_RDWR)
+        getattr(ch, "s", ch).shutdown(so.SHUT_RDWR)  # a Chan, or a bare channel socket (ssh_test's carry)
     except OSError:
         pass
     ch.close()
@@ -764,7 +779,7 @@ def settings_relay_test():
     stop = relay_pool(6100, path)
     o, _ = run("stat -c %a /run/bsl")
     bsl_mode = o.strip()
-    relay = Chan(open("/t/settings-relay.sh").read())
+    relay = Chan(app_text("settings-relay.sh"))
     o, st = run("n=0; while [ ! -S /run/bsl/settings.sock ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done; "
                 "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"/run/bsl/settings.sock\"); "
                 "s.sendall(b\"{\\\"v\\\":1,\\\"op\\\":\\\"hello\\\"}\\n\"); print(s.makefile().readline().strip())'", user="tester")
@@ -804,9 +819,9 @@ def mcp_test():
 
     httpd = HTTPServer(("127.0.0.1", 18765), H)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    o, st = run(open("/t/host-ports.sh").read())
+    o, st = run(app_text("host-ports.sh"))
     check("parity: host ports table (V13)", st == 0, o.strip())
-    o, st = run(open("/t/mcp-file.sh").read(), stdin=b"18765\nk3y-r10\n")
+    o, st = run(app_text("mcp-file.sh"), stdin=b"18765\nk3y-r10\n")
     o2, _ = run("stat -c '%a %U' /run/bsl/mcp")
     check("parity: /run/bsl/mcp is the user's, 0600 (V13)", st == 0 and o2.strip() == "600 tester", (o + o2).strip())
     init = b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qemu","version":"1"}}}\n'
@@ -820,7 +835,7 @@ def mcp_test():
     run("nft delete table ip breadstick_vm_host")
     o, st = run("curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:18765/mcp; echo \" rc=$?\"", user="tester")
     check("parity: without the table the VM's own loopback answers (the check can fail)", "rc=0" not in o, o.strip())
-    run(open("/t/host-ports.sh").read())
+    run(app_text("host-ports.sh"))
     httpd.shutdown()
 
 
@@ -835,18 +850,18 @@ def ssh_test():
         # from the distribution first, so the rest of the app's setup is what runs. A desktop VM image has the session.
         print("NOTE ssh: no breadstick-session in this image; openssh-server installed by the test", flush=True)
         run(PKG["install"].format(p="openssh-server" if DISTRO != "archlinux" else "openssh"))
-    o, st = run(open(f"/t/ssh-setup-{DISTRO}.sh").read())
+    o, st = run(app_text(f"ssh-setup-{DISTRO}.sh"))
     check(f"parity: ssh setup ({DISTRO}, V18)", st == 0 and "sshd" in o, o.strip().replace("\n", " | ")[-300:])
     if st != 0:
         return
-    sshd = Chan(open("/t/sshd-start.sh").read())
+    sshd = Chan(app_text("sshd-start.sh"))
     time.sleep(2)
     o, st = run("ss -ltn | grep -c ':2222 '; systemctl is-active ssh.service sshd.service 2>/dev/null | grep -c '^active' || true")
     w = o.split()
     check("parity: the app's sshd on 2222, the distribution's own units off (V18)", w[:1] in (["1"], ["2"]) and w[1:2] in (["0"], []),
           o.strip().replace("\n", " | "))
     # The banner through the forward, as an Android client gets it.
-    fwd = Chan(open("/t/port-forward.sh").read())
+    fwd = Chan(app_text("port-forward.sh"))
     got = fwd.lines(15, lambda l: l.startswith("SSH-2.0-"))
     check("parity: the forward carries sshd's banner (V18)", any(l.startswith("SSH-2.0-OpenSSH") for l in got), " | ".join(got[-3:]))
     hangup(fwd)
@@ -859,19 +874,35 @@ def ssh_test():
         run(PKG["install"].format(p={"debian": "openssh-client", "fedora": "openssh-clients"}.get(DISTRO, "openssh")))
     o, st = run("rm -f /tmp/bslk /tmp/bslk.pub; ssh-keygen -q -t ed25519 -N '' -f /tmp/bslk && cat /tmp/bslk.pub")
     pub = o.strip().splitlines()[-1:] if st == 0 else []
-    o, st = run(open("/t/authkeys.sh").read(), stdin=(pub[0] + "\n").encode() if pub else b"")
+    o, st = run(app_text("authkeys.sh"), stdin=("+ " + pub[0] + "\n").encode() if pub else b"")
     o2, _ = run("stat -c '%a %U' /home/tester/.ssh /home/tester/.ssh/authorized_keys")
-    check("parity: authorized_keys written with sshd's modes (V18)", st == 0 and "OK" in o and o2.split() == ["700", "tester", "600", "tester"],
-          (o + " | " + o2).strip().replace("\n", " | "))
+    check("parity: authorized_keys written with sshd's modes (V18)", st == 0 and "OK added=1 removed=0" in o
+          and o2.split() == ["700", "tester", "600", "tester"], (o + " | " + o2).strip().replace("\n", " | "))
+    # A change is an edit of the file the VM has (critic, round 10): a key added in the VM itself stays when the app
+    # adds one, and a removal takes only its own line.
+    other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSLparityOtherKeyAddedInsideTheVMxxxxxxxxxx in-vm"
+    run(f"echo '{other}' >> /home/tester/.ssh/authorized_keys")
+    o, st = run(app_text("authkeys.sh"), stdin=("+ " + pub[0] + "\n+ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSLparityThirdKeyFromTheAppxxxxxxxxxxxxxx app\n").encode())
+    o3, st3 = run(app_text("authkeys.sh"), stdin=b"- ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBSLparityThirdKeyFromTheAppxxxxxxxxxxxxxx app\n")
+    o2, _ = run("cat /home/tester/.ssh/authorized_keys")
+    lines = o2.strip().splitlines()
+    check("parity: a key change keeps the file's other keys (V18)", st == 0 and st3 == 0 and "OK added=1 removed=0" in o
+          and "OK added=0 removed=1" in o3 and pub and lines == [pub[0], other],
+          (o + " | " + o3 + " | " + str(lines)).strip().replace("\n", " | ")[-400:])
     lst = so.socket(so.AF_INET, so.SOCK_STREAM)
     lst.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1)
     lst.bind(("0.0.0.0", 12222))
     lst.listen(4)
     me = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
 
-    def carry(c):
+    # port-forward.sh is the app's command for a client at 192.168.1.20 (127.168.1.20 in the VM); a second client,
+    # 192.168.1.21, is the same text with its address.
+    fwd_owner = app_text("port-forward.sh").strip()
+    fwd_other = fwd_owner.replace(" 127.168.1.20 ", " 127.168.1.21 ")
+
+    def carry(c, text):
         ch = bslvm.connect(args, bslvm.AGENT_PORT)
-        bslvm.request(ch, "r", bslvm.run_payload(open("/t/port-forward.sh").read().strip(), "root"))
+        bslvm.request(ch, "r", bslvm.run_payload(text, "root"))
 
         def down():
             try:
@@ -894,31 +925,87 @@ def ssh_test():
                 bslvm.send_frame(ch, "d", d)
         except OSError:
             pass
-        ch.close()
+        # The client is gone: hang the command up, as VmPortForward does (proc.destroy()). A bare close() would leave
+        # the channel open under down()'s blocked read, and the VM's sshd would keep the connection.
+        hangup(ch)
         c.close()
 
-    def accept():
+    def accept(sock, text):
         while True:
             try:
-                c, _ = lst.accept()
+                c, _ = sock.accept()
             except OSError:
                 return
-            threading.Thread(target=carry, args=(c,), daemon=True).start()
+            threading.Thread(target=carry, args=(c, text), daemon=True).start()
 
-    threading.Thread(target=accept, daemon=True).start()
+    lst2 = so.socket(so.AF_INET, so.SOCK_STREAM)
+    lst2.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1)
+    lst2.bind(("0.0.0.0", 12223))
+    lst2.listen(8)
+    threading.Thread(target=accept, args=(lst, fwd_owner), daemon=True).start()
+    threading.Thread(target=accept, args=(lst2, fwd_other), daemon=True).start()
+    o, _ = run("sshd -T 2>/dev/null | grep -i '^persourcepenaltyexemptlist' || echo none")
+    check("parity: sshd exempts only the forward's fallback address (V18)", o.strip().lower() == "persourcepenaltyexemptlist 127.0.0.1",
+          o.strip())
     if not me:
         check("parity: ssh login through the forward (V18)", False, "this container has no address for the VM to reach")
     else:
-        o, st = run(f"timeout 40 ssh -p 12222 -i /tmp/bslk -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                    f"-o BatchMode=yes -o LogLevel=ERROR tester@{me[0]} 'id -un; echo $SSH_CONNECTION'")
-        check("parity: ssh login through the forward (V18)", st == 0 and o.split()[:1] == ["tester"] and "127.0.0.1" in o,
+        ssh = ("timeout 40 ssh -p {port} -i {key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+               "-o BatchMode=yes -o LogLevel=ERROR -o IdentitiesOnly=yes tester@" + me[0] + " 'id -un; echo $SSH_CONNECTION'")
+        o, st = run(ssh.format(port=12222, key="/tmp/bslk"))
+        check("parity: ssh login through the forward (V18)", st == 0 and o.split()[:1] == ["tester"],
               o.strip().replace("\n", " | ")[-300:])
+        # sshd sees the client's own loopback address, not 127.0.0.1 for everyone (OpenSSH's PerSourcePenalties).
+        check("parity: sshd sees each client by an address of its own (V18)", o.split()[1:2] == ["127.168.1.20"],
+              o.strip().replace("\n", " | ")[-300:])
+        # A stranger is penalized by its own address: logins with a key that is not authorized, then connections that
+        # never log in (sshd's "noauth", 1 s each; enforced from 15 s, OpenSSH's default). The owner's next login still
+        # works, as under proot, where sshd sees every client's real address.
+        run("rm -f /tmp/bslk2 /tmp/bslk2.pub; ssh-keygen -q -t ed25519 -N '' -f /tmp/bslk2")
+        tries = []
+        for _ in range(3):
+            o, st = run(ssh.format(port=12223, key="/tmp/bslk2"))
+            tries.append(f"{st}:{o.strip()[-80:]}")
+        # From this container, the network side, as LAN clients reach Android's port.
+        for _ in range(20):
+            try:
+                k = so.create_connection(("127.0.0.1", 12223), timeout=10)
+                k.recv(64)
+                k.close()
+            except OSError:
+                pass
+        time.sleep(2)
+        # The stranger's next connection, from this side too: sshd refuses it at once.
+        sshd.take()
+        t0 = time.time()
+        try:
+            k = so.create_connection(("127.0.0.1", 12223), timeout=10)
+            got = k.recv(64)
+            k.close()
+        except OSError as e:
+            got = repr(e).encode()
+        took = time.time() - t0
+        time.sleep(1)
+        log = sshd.take().decode(errors="replace").strip().splitlines()
+        said = [l for l in log if "127.168.1.21" in l and "penalty" in l]
+        # sshd's own answer to a penalized address, at once, never a banner.
+        refused = got.startswith(b"Not allowed at this time") and took < 8
+        o = f"got {got[:40]!r} after {took:.1f} s | sshd: " + " ; ".join(said[-1:])
+        if not refused:
+            pen, _ = run("sshd -T 2>/dev/null | grep -i '^persourcepenalt'")
+            o += " | tries: " + " ; ".join(tries) + " | " + pen.strip().replace("\n", " ; ") + " | sshd: " + " ; ".join(log[-20:])
+        check("parity: a client that keeps failing is refused, by its own address (the check can fail) (V18)", refused,
+              o.strip().replace("\n", " | ")[-1500:])
+        o, st = run(ssh.format(port=12222, key="/tmp/bslk"))
+        check("parity: another client's failed logins never lock the owner out (V18)", st == 0 and o.split()[:1] == ["tester"],
+              f"status {st}: " + o.strip().replace("\n", " | ")[-300:])
     lst.close()
+    lst2.close()
     hangup(sshd)
     time.sleep(2.5)
     o, _ = run("ss -ltn | grep -c ':2222 ' || true")
     check("parity: stopping SSH ends the VM's sshd (V18)", o.strip() == "0", o.strip())
-    run("rm -f /tmp/bslk /tmp/bslk.pub")
+    run("rm -f /tmp/bslk /tmp/bslk.pub /tmp/bslk2 /tmp/bslk2.pub")
 
 
 def engine_test():

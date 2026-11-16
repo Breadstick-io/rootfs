@@ -163,7 +163,10 @@ round 10.
 
 Only the host opens channels, so each way into the VM is a channel the app opens, and none needs a new guest program
 (an image published before 4.0 takes them as it is). Android `vm/VmInbound.kt`, `vm/VmSocketRelay.kt`,
-`vm/VmPortForward.kt`; the commands are `VmCommands`', copied here and checked by Android's VmInboundTest.
+`vm/VmPortForward.kt`; the commands are `VmCommands`', copied here byte for byte from Android's
+`app/src/test/resources/vm/` (VmInboundTest checks those are the app's text). qemu-test.py prints each one's sha256 as
+`SCRIPT <name> <sha256>` when it runs it, and AutoBuild's parity gate compares that with Android's copy, so a copy
+here that drifted fails the cells it backs.
 
 - **/run/bsl/settings.sock** (Breadstick Settings in Linux): at the boot the app runs `test/settings-relay.sh` as root:
   the image's bsl-x11-relay on vsock **6100**, listening at `/run/breadstick-vm/relay/settings.sock` (the relay makes
@@ -174,10 +177,16 @@ Only the host opens channels, so each way into the VM is a channel the app opens
   app's MCP server runs; `test/host-ports.sh` gives the table `ip breadstick_vm_host`, which sends the VM's own
   127.0.0.1:<that port> to bsl-vmnet (as vmnet.nft does for bsl0), and VmNetRelay connects it to the app's 127.0.0.1.
 - **SSH on 2222**: the app's own setup (`test/ssh-setup-<distro>.sh`, the proot script with the distribution's sshd
-  units left off), `test/sshd-start.sh` held by the app (sshd makes a session of its own even with -D, so the shell
-  around it ends it and its sessions on the hangup), `test/authkeys.sh` for ~/.ssh/authorized_keys. The app listens on
-  2222 on Android and runs `test/port-forward.sh` (bash's /dev/tcp to 127.0.0.1:2222, stderr nowhere, exit 7 when
-  nothing listens) for each connection: its stdin and output are the connection.
+  units left off and `PerSourcePenaltyExemptList 127.0.0.1` in `/etc/ssh/sshd_config.d/breadstick-vm.conf` when sshd
+  knows the option), `test/sshd-start.sh` held by the app (sshd makes a session of its own even with -D, so the shell
+  around it ends it and its sessions on the hangup), `test/authkeys.sh` for ~/.ssh/authorized_keys: an edit read from
+  stdin ("+ KEY" adds, "- KEY" removes) applied to the file the VM has, never a copy of the app's list written over it;
+  it prints `OK added=N removed=M`. The app listens on 2222 on Android and runs `test/port-forward.sh` for each
+  connection (its stdin and output are the connection; stderr nowhere, exit 7 when nothing listens): python3 connects
+  to 127.0.0.1:2222 FROM a loopback address of the client's own, 127. and the client's last three bytes
+  (192.168.1.20 is 127.168.1.20, the copy's), so sshd's per-source penalties (OpenSSH 9.8 and later) fall on the
+  client that earned them, as under proot, and its log names the client; without python3, bash's /dev/tcp from
+  127.0.0.1, the exempt address.
 
 qemu-test.py's "parity: ..." checks run all three against the image (PARITY=0 skips them); AutoBuild
 `test/parity/parity-gate.py` reads them per distribution.
