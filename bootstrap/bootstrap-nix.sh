@@ -12,8 +12,9 @@
 # root.img.zst, image.json} as bake-vm.sh writes Debian's, "distro": "nix", the kernel line's
 # init=/nix/var/nix/profiles/system/init (NixOS 26.05's systemd stage 1 resolves it to the newest generation's closure;
 # /sbin/init, a script, is no closure to it) and no root= (stage 1 mounts / from the configuration's fileSystems, and a
-# root= beside it is a second sysroot.mount), and with MANIFEST_DIR a local manifest-vm-nix-<arch>.json (the app reads
-# only Debian's manifest-vm-<arch>.json from the CDN today; a per-distribution name is V4's, plan 5.14). Test it with
+# root= beside it is a second sysroot.mount), and with MANIFEST_DIR a local nix/manifest-vm-<arch>.json: the one name
+# the app reads (VmManifest.manifestName for Distro.NIX, plan 5.14 V4), the one AutoBuild deploy/vm-image.sh DISTRO=nix
+# publishes and tools/serve-test-images.sh serves (round 10; it was manifest-vm-nix-<arch>.json). Test it with
 # vm/test/qemu-test-nix.sh.
 #
 # From the official nixos/nix container image (this host's architecture: an x86-64 system is built by the arm64 Nix,
@@ -357,9 +358,9 @@ if [ "$WHAT" = vm ]; then
 }
 EOF
   if [ -n "${MANIFEST_DIR:-}" ]; then
-    mkdir -p "$MANIFEST_DIR"
-    sed "s|\"name\": \"$NAME\",|\"name\": \"$NAME\",\n  \"base\": \"vm/$NAME/\",|" "$VOUT/image.json" > "$MANIFEST_DIR/manifest-vm-nix-$ARCH.json"
-    log "local manifest $MANIFEST_DIR/manifest-vm-nix-$ARCH.json"
+    mkdir -p "$MANIFEST_DIR/nix"
+    sed "s|\"name\": \"$NAME\",|\"name\": \"$NAME\",\n  \"base\": \"vm/$NAME/\",|" "$VOUT/image.json" > "$MANIFEST_DIR/nix/manifest-vm-$ARCH.json"
+    log "local manifest $MANIFEST_DIR/nix/manifest-vm-$ARCH.json"
   fi
   log "Artifact: $VOUT (system $TOP)"
   log "Nothing was uploaded."
