@@ -2126,7 +2126,16 @@ true"""}[DISTRO]
         # apt-get update; dnf refreshes by itself); its copy is rootfs vm/test/reinstall-<family>.sh.
         if DISTRO == "debian":
             run("apt-get update -q >/dev/null 2>&1", user="root")
+        # Round 11: a -staged- Fedora image's breadstick.repo names the RPM stage (rpm_refresh), which dnf must reach
+        # as a device reaches rpm.breadstick.io; bound again for the reinstall (dnf fails on a repository it cannot read).
+        hs = None
+        if DISTRO == "fedora" and os.path.isdir("/rpmrepo"):
+            hs = share_open()
+            run("mkdir -p /bsl-stage && mount --bind /mnt/host/rpmrepo /bsl-stage")
         o, st = run(open(f"/t/reinstall-{DISTRO}.sh").read(), user="root")
+        if hs is not None:
+            run("umount /bsl-stage")
+            share_close(hs)
         gone, _ = run("test -e /var/lib/breadstick-vm/restore-left-out || echo gone")
         check("proot restore: the refresh installs what was left out again, and the record goes", st == 0 and "gone" in gone,
               f"exit {st}: {' | '.join(o.strip().splitlines()[-6:])}")
