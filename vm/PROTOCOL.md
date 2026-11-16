@@ -196,6 +196,39 @@ here that drifted fails the cells it backs.
 qemu-test.py's "parity: ..." checks run all three against the image (PARITY=0 skips them); AutoBuild
 `test/parity/parity-gate.py` reads them per distribution.
 
+## Files, devices and the scale (agent runs, plan 5.14 V12, V14, V10, V11)
+
+The same rule as the ways in: channels the app opens, commands copied here from Android (`SCRIPT` lines, the parity
+gate), nothing new in the image but `openssh-sftp-server` (Debian; Fedora's sftp-server is in openssh-server, Arch's in
+openssh), which the bakes now put in; on a Debian image from before, the app installs that one package on first use,
+as it does sshfs.
+
+- **Android's folders in the home and SD cards** (V12): with All files access, `test/mount-home.sh` mounts one of
+  Android's folders over `~/Downloads` (and Documents, Pictures, Music, Camera) by the "Files" route above, making the
+  folder as the user when the home has none; `test/mount-sd.sh` mounts each removable volume at `/mnt/<name>`. The app
+  mounts them before the session starts and passes `BREADSTICK_VOLUMES`, so the session's bookmarks and desktop links
+  for the cards are made as under proot.
+- **The Files provider** (V12): `test/sftp-guest.sh` runs the VM's own sftp-server as the Linux user, in the home, on the
+  channel (stderr nowhere; exit 127 when there is none); `test/sftp-install-<distro>.sh` is the root step before
+  it. The app speaks SFTP 3 to it (Android `vm/VmSftp.kt`, `vm/VmDocuments.kt`).
+- **Printing** (V14): `test/print-server.sh`, held as root for the session: breadstick-print's bsl-print-server (its own
+  cupsd and printer), with `/run/cups/cups.sock` a link to its socket; the distribution's cups units, if they ran, are
+  stopped for the session and started again after. Each job the backend leaves in `/tmp/.bsl-print` goes out on stdout
+  as `JOB <name> <job bytes> <pdf bytes>`, the .job, the .pdf, and is deleted.
+- **Camera** (V14): libbsl-cam as the session preloads it with `camera-v2`, reading `/run/bsl/camera`
+  (`test/camera-descriptor.txt`, the app's text) and streaming from the app's own port, which the `breadstick_vm_host`
+  table leads to (`test/host-ports-camera.sh`). No kernel device: v4l2loopback is a DKMS module, rebuilt for every
+  kernel the VM installs (V7), which a userspace library does not need.
+- **Controllers** (V14): `test/pad-feeder.sh`, held as root: python3 makes each controller a uinput Xbox 360 pad
+  (xpad's ids, codes and ranges, as libbsl-pad shows them under proot) from lines on stdin (`S <slot> <buttons> <8
+  axes> <name>`, `R <slot>`), so udev, SDL and evtest see real devices. Rumble is not carried.
+- **Per-app scale and drag and drop** (V10): the app writes `/tmp/bsl-xres-<dpi>` (`test/xres-144.txt`) through the
+  file op and gives the program proot's variables (`test/scale-env.txt`, XENVIRONMENT included); a program not
+  Chromium by its name is checked for Chromium's resource packs in the VM (`test/launch-scaled.sh`). A drop runs
+  `test/drop.sh` (bsl-drop) as the user, on the VM's /mnt/host mount of the folder the app copied the files into.
+- **Fast pixels** (V11): no shared memory crosses into the VM; qemu-test.py records a 1280x720 XPutImage redraw through
+  the display relay against the same program on the test's own X server.
+
 ## Testing without a device
 
 ```

@@ -1,0 +1,1 @@
+exec 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; for s in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server; do [ -x "$s" ] && exec "$s"; done; d=$(command -v sshd) && s=$(dirname "$(readlink -f "$d")")/../libexec/sftp-server && [ -x "$s" ] && exec "$s"; exit 127

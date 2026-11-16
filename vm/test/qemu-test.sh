@@ -14,6 +14,7 @@
 #                                                                  # (its own files from file-backup.sh's round trip too)
 #   CID=78 vm/test/qemu-test.sh ...                # the guest's vsock CID (default 77): one per test running at once
 #   PARITY=0 vm/test/qemu-test.sh ...              # skip the ways in and the packages checks (plan 5.14 V13, V15, V16, V18)
+#                                                   # and files, devices, the scale, the redraw (V12, V14, V10, V11)
 #   HEAVY=0|1 vm/test/qemu-test.sh ...             # Repair and Updates (full upgrades) in the packages checks (default: 1 on arm64)
 # arm64 runs under KVM on an arm64 host; amd64 under TCG (slow). Needs the bsl-vmtest:3 image
 # (Debian 13 + qemu-system-arm/x86 + python3; Dockerfile beside this script).

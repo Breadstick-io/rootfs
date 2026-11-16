@@ -152,8 +152,11 @@ if [ "$DISTRO" = fedora ]; then
     install -m 0755 "$G/files/bsl-unzboot" /usr/lib/breadstick-vm/bsl-unzboot
     X="xterm xdpyinfo xwininfo xset xorg-x11-xauth xdotool wmctrl dbus-x11 dejavu-sans-mono-fonts"
     # shellcheck disable=SC2086
+    # openssh-server for its sftp-server, what the app reads the Linux user's home through (plan 5.14 V12: the Files
+    # provider); its sshd units stay off, as the app's SSH setup leaves them (V18).
     $D install kernel-core dracut systemd systemd-udev systemd-pam dbus kmod e2fsprogs iproute nftables fuse-sshfs zram-generator \
-        util-linux sudo shadow-utils passwd procps-ng python3 zstd gzip xz tmux curl systemd-networkd $X
+        util-linux sudo shadow-utils passwd procps-ng python3 zstd gzip xz tmux curl systemd-networkd openssh-server $X
+    systemctl disable sshd.service sshd.socket >/dev/null 2>&1 || true
     v=$(ls /usr/lib/modules | head -n 1)
     [ "$(ls /usr/lib/modules | wc -l)" = 1 ] || { echo "more than one kernel: $(ls /usr/lib/modules)" >&2; exit 1; }
     # kernel-core's own scriptlet ran kernel-install before this system's settings were all there (the settings went
@@ -234,8 +237,9 @@ else
     pacman-key --init >/dev/null 2>&1
     X="xterm xorg-xdpyinfo xorg-xwininfo xorg-xset xorg-xauth xdotool wmctrl ttf-dejavu"
     # shellcheck disable=SC2086
+    # openssh for its sftp-server (plan 5.14 V12: the Files provider); its sshd is never enabled here.
     pacman --config /tmp/bake.conf -Syu --noconfirm --needed linux mkinitcpio systemd kmod e2fsprogs iproute2 \
-        nftables sshfs zram-generator util-linux sudo shadow procps-ng python zstd tmux curl $X
+        nftables sshfs zram-generator util-linux sudo shadow procps-ng python zstd tmux curl openssh $X
     [ -s /boot/vmlinuz-linux ] && [ -s /boot/initramfs-linux.img ] || { echo "no /boot/vmlinuz-linux and initramfs-linux.img" >&2; ls -la /boot >&2; exit 1; }
     if [ -n "$STAGE" ]; then
         [ "$(bsl_session_version)" = "$want" ] || { echo "breadstick-session is $(bsl_session_version), the stage's $want" >&2; exit 1; }

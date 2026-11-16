@@ -92,7 +92,8 @@ cat "$KEYRING" > "$STAGE/debian-archive-keyring.gpg"
 KEYRING="$STAGE/debian-archive-keyring.gpg"
 chmod -R a+rX "$STAGE"
 
-# 2. The system. sshfs mounts the app's shared folders (vm/PROTOCOL.md "Files").
+# 2. The system. sshfs mounts the app's shared folders (vm/PROTOCOL.md "Files"); openssh-sftp-server is what the
+#    app reads the Linux user's home through for the Files provider (plan 5.14 V12; no daemon, no unit).
 #    While Breadstick's packages install, the chroot's /run/bsl/engine says "vm": their
 #    /usr/lib/breadstick/bsl-engine (packages vm-3.2) reads it, and in a plain chroot it would answer
 #    "proot" and apply proot-only fixups (clearing executable stacks) to a VM image. Removed before
@@ -102,7 +103,7 @@ chmod -R a+rX "$STAGE"
 #    script the app runs, as on the Standard system; without it the VM showed stock XFCE).
 INCLUDE="systemd-sysv,udev,dbus,dbus-user-session,libpam-systemd,$KPKG,initramfs-tools,kmod,iproute2,nftables,\
 sudo,passwd,ca-certificates,locales,less,nano,procps,psmisc,curl,wget,tmux,openssh-client,bash-completion,python3,\
-apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,systemd-zram-generator,sshfs,\
+apt-utils,gnupg,file,xz-utils,zstd,e2fsprogs,systemd-zram-generator,sshfs,openssh-sftp-server,\
 xterm,x11-apps,x11-utils,x11-xserver-utils,xdotool,wmctrl,dbus-x11,fonts-dejavu-core,xauth"
 if [ "$DESKTOP" = 1 ]; then
   INCLUDE="$INCLUDE,xfce4-session,xfwm4,xfce4-panel,xfdesktop4,xfce4-settings,xfconf,thunar,xfce4-terminal,\

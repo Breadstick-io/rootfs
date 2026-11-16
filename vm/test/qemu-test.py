@@ -449,7 +449,7 @@ def bridges_test():
     check("bridges: features written", st == 0)
     # LinuxEnvironment.desktopSessionScript(0, rootless=true, vm=true), run as root with displayEnv(true).
     session = Chan("export BREADSTICK_WAYLAND=0 BREADSTICK_COMPOSITOR=0 BREADSTICK_DARK=0 BREADSTICK_LOCALE=en_US.UTF-8 "
-                   "BREADSTICK_DPI=96 BREADSTICK_GPU=0; export BREADSTICK_VOLUMES=''; "
+                   f"BREADSTICK_DPI=96 BREADSTICK_GPU=0; export BREADSTICK_VOLUMES='{VOLUMES}'; "
                    "F=/usr/lib/breadstick/start-desktop-x11.sh; sh \"$F\" 0 tester 1",
                    env=["DISPLAY=:0", "NO_AT_BRIDGE=1", "LIBGL_KOPPER_DISABLE=1", "BREADSTICK_ROOTLESS=1"])
     up = session.lines(90, lambda l: "rootless mode" in l)
@@ -660,6 +660,487 @@ def files_test():
     __import__("shutil").rmtree("/w/share", ignore_errors=True)
 
 
+_SCRIPTS = {}
+
+
+def app_text(name):
+    b = open("/t/" + name, "rb").read()
+    if name not in _SCRIPTS:
+        import hashlib
+        _SCRIPTS[name] = hashlib.sha256(b).hexdigest()
+        print(f"SCRIPT {name} {_SCRIPTS[name]}", flush=True)
+    return b.decode()
+
+
+def hangup(ch):
+    """What the app's closing of a channel is to the agent: shut down first, since Linux keeps a socket open under the
+    reader thread's blocked recv() (as files_test does)."""
+    import socket as so
+    try:
+        getattr(ch, "s", ch).shutdown(so.SHUT_RDWR)  # a Chan, or a bare channel socket (ssh_test's carry)
+    except OSError:
+        pass
+    ch.close()
+
+
+# ----------------------------------------------------------------------------- plan 5.14 V12, V14, V10, V11 (round 11)
+# The app's own text again (app_text: rootfs vm/test/<name> = Android app/src/test/resources/vm/<name>, checked by
+# VmInboundTest), each check named "parity: ... (Vnn)" for the parity gate. Every one that a broken app text or a broken
+# guest would pass is paired with the case that shows it can fail.
+
+PARITY_ON = os.environ.get("PARITY", "1") == "1"
+VOLUMES = ""      # BREADSTICK_VOLUMES for the Floating session in bridges_test, once an SD card is mounted
+V12 = {}
+
+
+def mount_app_text(name, mountpoint, wait_s=10):
+    """An app mount command (VmFiles: an agent run of sshfs -o passive as root) served by OpenSSH's sftp-server in this
+    container, whose / stands in for an Android folder. Returns (channel, server), or None when it never mounted."""
+    if not os.path.exists("/usr/lib/openssh/sftp-server"):
+        return None
+    sftp = subprocess.Popen(["/usr/lib/openssh/sftp-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    s = bslvm.connect(args, bslvm.AGENT_PORT)
+    bslvm.request(s, "r", bslvm.run_payload(app_text(name).strip()))
+
+    def g2s():
+        try:
+            for t, d in bslvm.frames(s):
+                if t == "o":
+                    sftp.stdin.write(d)
+                    sftp.stdin.flush()
+        except (OSError, EOFError, ValueError):
+            pass
+
+    def s2g():
+        try:
+            while True:
+                d = sftp.stdout.read1(65536)
+                if not d:
+                    break
+                bslvm.send_frame(s, "d", d)
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=g2s, daemon=True).start()
+    threading.Thread(target=s2g, daemon=True).start()
+    o, st = run(f"n=0; while ! mountpoint -q '{mountpoint}' && [ $n -lt {wait_s * 10} ]; do sleep 0.1; n=$((n+1)); done; mountpoint -q '{mountpoint}'")
+    if st != 0:
+        sftp.kill()
+        return None
+    return s, sftp
+
+
+def unmount_app_text(h, mountpoint):
+    s, sftp = h
+    hangup(s)
+    o, _ = run(f"n=0; while mountpoint -q '{mountpoint}' && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done; "
+               f"mountpoint -q '{mountpoint}' && echo still-mounted || echo unmounted")
+    sftp.kill()
+    return "unmounted" in o
+
+
+def v12_mounts_open():
+    """The SD card at /mnt/sd-card and Android's Downloads in the home (VmFiles' extra shares), mounted before the
+    Floating session starts, as the app mounts them (VmBridges.beforeSession), so the session's bookmarks see the card."""
+    global VOLUMES
+    if not os.path.exists("/usr/lib/openssh/sftp-server"):
+        print("SKIP V12 mounts (no sftp-server in the test container)")
+        return
+    os.makedirs("/w/v12", exist_ok=True)
+    with open("/w/v12/from-android.txt", "w") as f:
+        f.write("made on Android\n")
+    run("rm -rf /home/tester/Downloads")
+    V12["dl"] = mount_app_text("mount-home.sh", "/home/tester/Downloads")
+    o, st = run("stat -c '%U' /home/tester/Downloads; cat /home/tester/Downloads/w/v12/from-android.txt; "
+                "echo from-vm > /home/tester/Downloads/w/v12/from-vm.txt && echo wrote", user="tester")
+    check("parity: Android's Downloads in the home, the user's (V12)",
+          V12["dl"] is not None and o.startswith("tester") and "made on Android" in o and "wrote" in o
+          and open("/w/v12/from-vm.txt").read() == "from-vm\n", o.strip().replace("\n", " | "))
+    V12["sd"] = mount_app_text("mount-sd.sh", "/mnt/sd-card")
+    o, st = run("[ \"$(stat -c %d /mnt/sd-card)\" != \"$(stat -c %d /)\" ] && [ -n \"$(ls -A /mnt/sd-card)\" ] && echo volume; "
+                "cat /mnt/sd-card/w/v12/from-android.txt", user="tester")
+    check("parity: an SD card at /mnt/<name>, a volume as the session tells them (V12)",
+          V12["sd"] is not None and "volume" in o and "made on Android" in o, o.strip().replace("\n", " | "))
+    if V12["sd"] is not None:
+        VOLUMES = "sd-card=SD card"
+
+
+def v12_bookmark_check():
+    """After the Floating session (bridges_test) started with the card mounted and BREADSTICK_VOLUMES set, as the app
+    starts it now (LinuxEnvironment.desktopSessionScript passes volumeNames() in the VM too)."""
+    if not VOLUMES:
+        return
+    o, st = run("grep -c '^file:///mnt/sd-card SD card$' /home/tester/.config/gtk-3.0/bookmarks", user="tester")
+    check("parity: the session bookmarks the SD card in the VM (V12)", o.strip() == "1", o.strip())
+
+
+def v12_mounts_close():
+    if V12.get("dl"):
+        ok = unmount_app_text(V12["dl"], "/home/tester/Downloads")
+        o, _ = run("stat -c '%U %a' /home/tester/Downloads")
+        check("parity: the home's folder unmounted at the hangup, and it stays the user's (V12)",
+              ok and o.split()[:1] == ["tester"], o.strip())
+        # The check can fail: as root, the folder made with mkdir -p (VmFiles' /mnt command) is root's.
+        run("rmdir /home/tester/Downloads; mkdir -p /home/tester/Downloads")
+        o, _ = run("stat -c %U /home/tester/Downloads; rmdir /home/tester/Downloads")
+        check("parity: a folder made as root would be root's (the check can fail)", o.strip() == "root", o.strip())
+    if V12.get("sd"):
+        check("parity: the SD card unmounted at the hangup (V12)", unmount_app_text(V12["sd"], "/mnt/sd-card"))
+
+
+class Sftp:
+    """A minimal SFTP v3 client over an agent channel (the Files provider's side, Android VmSftp)."""
+
+    def __init__(self, ch):
+        self.ch, self.id, self.rest = ch, 0, b""
+        self.send_raw(bytes([1]) + struct.pack(">I", 3))
+        t, body = self.reply()
+        self.version = (t, struct.unpack(">I", body[:4])[0] if len(body) >= 4 else None)
+
+    def send_raw(self, b):
+        self.ch.send(struct.pack(">I", len(b)) + b)
+
+    def reply(self, timeout=15):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            self.rest += self.ch.take()
+            if len(self.rest) >= 4:
+                n = struct.unpack(">I", self.rest[:4])[0]
+                if len(self.rest) >= 4 + n:
+                    p, self.rest = self.rest[4:4 + n], self.rest[4 + n:]
+                    return p[0], p[1:]
+            time.sleep(0.05)
+        raise TimeoutError("no SFTP reply")
+
+    @staticmethod
+    def s(x):
+        x = x.encode() if isinstance(x, str) else x
+        return struct.pack(">I", len(x)) + x
+
+    def call(self, t, body):
+        self.id += 1
+        self.send_raw(bytes([t]) + struct.pack(">I", self.id) + body)
+        rt, rb = self.reply()
+        return rt, rb[4:]
+
+    def realpath(self, p):
+        t, b = self.call(16, self.s(p))
+        n = struct.unpack(">I", b[4:8])[0]
+        return b[8:8 + n].decode() if t == 104 else None
+
+    def write(self, path, data):
+        t, b = self.call(3, self.s(path) + struct.pack(">II", 0x1A, 0))  # WRITE|CREAT|TRUNC
+        if t != 102:
+            return False
+        h = b[4:4 + struct.unpack(">I", b[:4])[0]]
+        t, b = self.call(6, self.s(h) + struct.pack(">Q", 0) + self.s(data))
+        ok = t == 101 and struct.unpack(">I", b[:4])[0] == 0
+        self.call(4, self.s(h))
+        return ok
+
+    def names(self, d):
+        t, b = self.call(11, self.s(d))
+        if t != 102:
+            return None
+        h = b[4:4 + struct.unpack(">I", b[:4])[0]]
+        out = []
+        while True:
+            t, b = self.call(12, self.s(h))
+            if t != 104:
+                break
+            n, off = struct.unpack(">I", b[:4])[0], 4
+            for _ in range(n):
+                ln = struct.unpack(">I", b[off:off + 4])[0]
+                out.append(b[off + 4:off + 4 + ln].decode())
+                off += 4 + ln
+                ln = struct.unpack(">I", b[off:off + 4])[0]
+                off += 4 + ln
+                flags = struct.unpack(">I", b[off:off + 4])[0]
+                off += 4
+                if flags & 1: off += 8
+                if flags & 2: off += 8
+                if flags & 4: off += 4
+                if flags & 8: off += 8
+                if flags & 0x80000000:
+                    k = struct.unpack(">I", b[off:off + 4])[0]
+                    off += 4
+                    for _ in range(2 * k):
+                        off += 4 + struct.unpack(">I", b[off:off + 4])[0]
+        self.call(4, self.s(h))
+        return out
+
+
+def v12_sftp_test():
+    """The Files provider in the VM (V12): the VM's own sftp-server, installed where that is Debian's own package
+    (sftp-install-debian.sh), else present in the image (sftp-install-fedora.sh, -archlinux.sh), started as the Linux user with the app's
+    command (sftp-guest.sh): its "." is the home, and a file written through it is the user's."""
+    o, st = run(app_text(f"sftp-install-{DISTRO}.sh"))
+    if st != 0 and DISTRO != "debian":
+        # Fedora's sftp-server is in openssh-server, which the bake now puts in (vm/bake-vm-distro.sh): an image baked
+        # before it gets it here, as the test's own step, never the app's.
+        run(PKG["install"].format(p="openssh-server") + "; systemctl disable --now sshd.service sshd.socket >/dev/null 2>&1")
+        o, st = run(app_text(f"sftp-install-{DISTRO}.sh"))
+    check("parity: the VM's sftp-server there (V12)", st == 0, o.strip()[-200:])
+    ch = Chan(app_text("sftp-guest.sh"), user="tester")
+    try:
+        c = Sftp(ch)
+        home = c.realpath(".")
+        wrote = c.write("from-provider.txt", b"written by the Files provider\n")
+        names = c.names(".") or []
+    except Exception as e:  # noqa: BLE001
+        home, wrote, names = repr(e), False, []
+    hangup(ch)
+    o, _ = run("stat -c %U /home/tester/from-provider.txt; cat /home/tester/from-provider.txt")
+    check("parity: the Files provider reads and writes the VM user's home (V12)",
+          home == "/home/tester" and wrote and "from-provider.txt" in names and o.startswith("tester") and "written by" in o,
+          f"home {home!r}, wrote {wrote}, {len(names)} names; {o.strip()!r}")
+    run("rm -f /home/tester/from-provider.txt")
+    # The check can fail: a command that finds no sftp-server ends 127 and answers nothing.
+    o, st = run(app_text("sftp-guest.sh").replace("/usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server", "/nowhere")
+                .replace("d=$(command -v sshd)", "d=$(command -v no-such-sshd)"), user="tester", stdin=b"")
+    check("parity: without sftp-server the command ends 127 (the check can fail)", st == 127, str(st))
+
+
+TINY_PDF = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj "
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+
+
+def v14_print_test():
+    """Printing (V14): breadstick-print's server in the VM as the app holds it (print-server.sh), a PDF printed with lp,
+    and the job handed over on the channel in the shape VmPrint.receive reads."""
+    o, st = run("[ -x /usr/lib/breadstick/bsl-print-server ] && command -v lp >/dev/null && echo ready")
+    if "ready" not in o:
+        # As the VM's refresh puts breadstick-print in (VmGuestUpdate, "when the repository has it"); lp for the test.
+        pk = {"debian": "breadstick-print cups-client", "fedora": "cups-client", "archlinux": "cups"}[DISTRO]
+        run(PKG["install"].format(p=pk))
+        o, st = run("[ -x /usr/lib/breadstick/bsl-print-server ] && command -v lp >/dev/null && echo ready")
+    if "ready" not in o:
+        check("parity: breadstick-print in the VM (V14)", False, "no bsl-print-server or lp (Fedora needs RPM_STAGE=)")
+        return
+    _, st = bslvm.simple(args, "f", b"/run/bsl/features\0" + b"644\0" + b"notify-v2 clipboard-v1 print-v1 ai-v1 mic-v1 region-v1 media-v1 camera-v2\n")
+    ch = Chan(app_text("print-server.sh"))
+    # The script's link, not the distribution's own socket (which it stops for the session).
+    o, st = run("n=0; while [ ! -L /run/cups/cups.sock ] && [ $n -lt 150 ]; do sleep 0.2; n=$((n+1)); done; ls -l /run/cups/cups.sock")
+    with open("/w/print-test.pdf", "wb") as f:
+        f.write(TINY_PDF)
+    o2, _ = run("printf '%s' '" + b64(TINY_PDF) + "' | base64 -d > /tmp/print-test.pdf; chmod 644 /tmp/print-test.pdf; "
+                "lp -d Breadstick -t 'From the VM' /tmp/print-test.pdf", user="tester")
+    got, t0 = b"", time.time()
+    while time.time() - t0 < 40 and b"%%EOF" not in got:
+        got += ch.take()
+        time.sleep(0.3)
+    head = got.split(b"\n", 1)[0].decode(errors="replace")
+    w = head.split()
+    ok = len(w) == 4 and w[0] == "JOB"
+    meta = pdf = b""
+    if ok:
+        rest = got.split(b"\n", 1)[1]
+        meta, pdf = rest[:int(w[2])], rest[int(w[2]):int(w[2]) + int(w[3])]
+    check("parity: a PDF printed in the VM reaches the app (V14)",
+          ok and pdf.startswith(b"%PDF-") and b"title=From the VM" in meta,
+          f"{o.strip()[-80:]} | lp: {o2.strip()} | {head!r} | {meta[:60]!r} | {len(pdf)} bytes")
+    o, _ = run("ls /tmp/.bsl-print | wc -l")
+    check("parity: the spool is empty after the hand-over (V14)", o.strip() == "0", o.strip())
+    hangup(ch)
+    time.sleep(3)
+    o, _ = run("pgrep -f '[c]upsd -f -c /etc/breadstick/cups' >/dev/null && echo cupsd-left; [ -L /run/cups/cups.sock ] && echo link-left; "
+               "echo checked; systemctl is-active cups.service 2>/dev/null || true")
+    check("parity: closing the channel ends the print server (V14)", o.strip().split("\n")[0] == "checked", o.strip().replace("\n", " | "))
+    # The check can fail: without print-v1 the backend refuses the job, and nothing is handed over.
+    _, st = bslvm.simple(args, "f", b"/run/bsl/features\0" + b"644\0" + b"notify-v2 clipboard-v1\n")
+    ch = Chan(app_text("print-server.sh"))
+    run("n=0; while [ ! -L /run/cups/cups.sock ] && [ $n -lt 150 ]; do sleep 0.2; n=$((n+1)); done")
+    run("lp -d Breadstick /tmp/print-test.pdf", user="tester")
+    time.sleep(8)
+    check("parity: without print-v1 no job arrives (the check can fail)", b"JOB " not in ch.take())
+    hangup(ch)
+    time.sleep(2)
+
+
+def v14_camera_test():
+    """The webcam (V14): libbsl-cam in the VM, as the session preloads it with camera-v2, reading /run/bsl/camera
+    (the app's descriptor) and streaming from the app's port, which the VM's loopback leads to (host-ports-camera.sh).
+    The app's camera server is a stand-in here that answers what CameraBridge answers."""
+    import socket as so
+    o, st = run("[ -r /usr/lib/breadstick/libbsl-cam.so ] && echo has")
+    if "has" not in o:
+        check("parity: libbsl-cam in the VM (V14)", False, "no /usr/lib/breadstick/libbsl-cam.so in this image")
+        return
+    frame = open("/t/cam-1280x720.jpg", "rb").read()
+    seen = []
+    srv = so.socket(so.AF_INET, so.SOCK_STREAM)
+    srv.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 18766))
+    srv.listen(4)
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            def one(c):
+                try:
+                    req = b""
+                    while b"\r\n\r\n" not in req:
+                        d = c.recv(4096)
+                        if not d:
+                            return
+                        req += d
+                    line = req.split(b"\r\n", 1)[0].decode()
+                    seen.append(line)
+                    if "t=tok123abc" not in line:
+                        c.sendall(b"HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                        return
+                    c.sendall(b"HTTP/1.0 200 OK\r\nX-Camera-Lens: front\r\n"
+                              b"Content-Type: multipart/x-mixed-replace; boundary=breadstickframe\r\n\r\n")
+                    for _ in range(60):
+                        c.sendall(b"--breadstickframe\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(frame) + frame + b"\r\n")
+                        time.sleep(1 / 30)
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+            threading.Thread(target=one, args=(c,), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    o, st = run(app_text("host-ports-camera.sh"))
+    _, st2 = bslvm.simple(args, "f", b"/run/bsl/camera\0" + b"644\0" + app_text("camera-descriptor.txt").encode())
+    probe = ("import fcntl, os, struct, sys\n"
+             "fd = os.open('/dev/video0', os.O_RDWR)\n"
+             "cap = bytearray(104)\n"
+             "fcntl.ioctl(fd, 0x80685600, cap)\n"
+             "print('CARD', bytes(cap[16:48]).split(b'\\0')[0].decode())\n"
+             "b = os.read(fd, 4 << 20)\n"
+             "print('FRAME', len(b), b[:2].hex())\n")
+    o, st = run(f"LD_PRELOAD=/usr/lib/breadstick/libbsl-cam.so timeout 30 python3 -c \"{probe}\"", user="tester")
+    check("parity: /dev/video0 in the VM streams the app's camera (V14)",
+          st == 0 and "CARD Breadstick" in o and re.search(r"FRAME [1-9][0-9]* ", o) is not None and any("t=tok123abc" in l for l in seen),
+          o.strip().replace("\n", " | ")[-200:] + f" | requests {seen[:2]}")
+    # The check can fail: without the table the VM's loopback has no camera server, and STREAMON (read) fails.
+    run("nft delete table ip breadstick_vm_host")
+    o, st = run(f"LD_PRELOAD=/usr/lib/breadstick/libbsl-cam.so timeout 20 python3 -c \"{probe}\"", user="tester")
+    check("parity: without the route no frame (the check can fail)", re.search(r"FRAME [1-9][0-9]* ", o) is None, o.strip()[-160:])
+    run("rm -f /run/bsl/camera")
+    srv.close()
+
+
+def v14_pad_test():
+    """Controllers (V14): the app's feeder (pad-feeder.sh) makes a uinput Xbox 360 pad in the VM's kernel, udev tags
+    it a joystick, and a button press reaches its evdev device, with nothing preloaded."""
+    ch = Chan(app_text("pad-feeder.sh"))
+    ch.send(b"S 0 0 0 0 0 0 0 0 0 0 Breadstick test pad\n")
+    first = ch.lines(15, lambda l: l.startswith("ok") or l.startswith("error"))
+    time.sleep(1.5)
+    o, _ = run("for d in /sys/class/input/event*; do [ \"$(cat $d/device/name 2>/dev/null)\" = 'Breadstick test pad' ] && echo /dev/input/${d##*/}; done")
+    dev = o.strip().split("\n")[0] if o.strip() else ""
+    u, _ = run(f"udevadm info --query=property --name={dev} 2>/dev/null | grep -E '^ID_INPUT_JOYSTICK=1|^ID_VENDOR_ID|^ID_MODEL_ID' | tr '\\n' ' '; "
+               f"cat /sys/class/input/{dev.rsplit('/', 1)[-1]}/device/id/vendor /sys/class/input/{dev.rsplit('/', 1)[-1]}/device/id/product 2>/dev/null | tr '\\n' ' '") if dev else ("", 1)
+    check("parity: a controller in the VM is a uinput Xbox 360 pad, a joystick to udev (V14)",
+          bool(dev) and "ID_INPUT_JOYSTICK=1" in u and "045e 028e" in u, f"{first} {dev} {u.strip()}")
+    if dev:
+        reader = Chan("exec python3 -c \"import os,struct\nfd=os.open('" + dev + "',os.O_RDONLY)\n"
+                      "while True:\n b=os.read(fd,24)\n t,c,v=struct.unpack('HHi',b[16:24])\n"
+                      " print(t,c,v,flush=True)\n if t==1 and c==0x130 and v==1: break\"")
+        time.sleep(1)
+        ch.send(b"S 0 1 0 0 0 0 0 0 0 0 Breadstick test pad\n")
+        got = reader.lines(10, lambda l: l.strip() == "1 304 1")
+        check("parity: a button pressed on Android reaches evdev in the VM (V14)", "1 304 1" in [l.strip() for l in got], repr(got[-4:]))
+        reader.close()
+    ch.send(b"R 0\n")
+    time.sleep(1)
+    o, _ = run("grep -l 'Breadstick test pad' /sys/class/input/*/device/name 2>/dev/null | wc -l")
+    check("parity: a controller gone from Android leaves the VM (V14)", o.strip() == "0", o.strip())
+    hangup(ch)
+
+
+def v10_scale_test():
+    """The per-app scale in the VM (V10): proot's variables (scale-env.txt) with the X resource file the app writes
+    through the agent (xres-144.txt at /tmp/bsl-xres-144): an X client's Xft.dpi is 144 at 150%, which no variable
+    alone gives xterm and the other X11 toolkits; and Chromium recognized by its files gets the flag."""
+    env = [l for l in app_text("scale-env.txt").splitlines() if l]
+    _, st = bslvm.simple(args, "f", b"/tmp/bsl-xres-144\0" + b"644\0" + app_text("xres-144.txt").encode())
+    probe = ("import ctypes\n"
+             "x = ctypes.CDLL('libX11.so.6'); x.XOpenDisplay.restype = ctypes.c_void_p\n"
+             "x.XGetDefault.restype = ctypes.c_char_p; x.XGetDefault.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]\n"
+             "d = x.XOpenDisplay(None)\n"
+             "print('XFT', x.XGetDefault(d, b'Xft', b'dpi'))\n")
+    o, st = run(f"python3 -c \"{probe}\"", user="tester", env=["DISPLAY=:0"] + env)
+    check("parity: a VM app at 150% has Xft.dpi 144 from its own resource file (V10)", st == 0 and "XFT b'144'" in o, o.strip())
+    o, st = run(f"python3 -c \"{probe}\"", user="tester", env=["DISPLAY=:0"] + [l for l in env if not l.startswith("XENVIRONMENT=")])
+    check("parity: without XENVIRONMENT no Xft.dpi (the check can fail)", "XFT b'144'" not in o, o.strip())
+    gtk = ("import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk\n"
+           "print('GTKDPI', Gtk.Settings.get_default().get_property('gtk-xft-dpi'))\n")
+    o, st = run(f"python3 -c \"{gtk}\"", user="tester", env=["DISPLAY=:0"] + env)
+    check("parity: GTK reads the same resource file in the VM (V10)", "GTKDPI 147456" in o, o.strip()[-120:])
+    run("mkdir -p /opt/bsl-fake && printf '#!/bin/sh\\necho ARGS \"$@\"\\n' > /opt/bsl-fake/bsl-fake-electron && "
+        "chmod 755 /opt/bsl-fake/bsl-fake-electron && : > /opt/bsl-fake/chrome_100_percent.pak && "
+        "ln -sf /opt/bsl-fake/bsl-fake-electron /usr/local/bin/bsl-fake-electron")
+    o, st = run(app_text("launch-scaled.sh"), user="tester")
+    check("parity: Chromium known by its files gets --force-device-scale-factor in the VM (V10)",
+          o.strip() == "ARGS --x --force-device-scale-factor=1.5", o.strip())
+    run("rm -f /opt/bsl-fake/chrome_100_percent.pak")
+    o, st = run(app_text("launch-scaled.sh"), user="tester")
+    check("parity: without Chromium's files no flag (the check can fail)", o.strip() == "ARGS --x", o.strip())
+    run("rm -rf /opt/bsl-fake /usr/local/bin/bsl-fake-electron")
+
+
+def v10_drop_test():
+    """Drag and drop into the VM (V10): the app copies the files into the shared folder and runs bsl-drop in the VM
+    with the app's text (drop.sh), on the VM's /mnt/host mount; a GTK window there takes the file."""
+    o, st = run("[ -f /usr/lib/breadstick/bsl-drop ] && python3 -c 'import gi' && echo has")
+    if "has" not in o:
+        check("parity: bsl-drop in the VM (V10)", False, o.strip())
+        return
+    h = share_open()
+    if h is None:
+        check("parity: /mnt/host for the drop (V10)", False)
+        return
+    os.makedirs("/w/drop", exist_ok=True)
+    with open("/w/drop/dropped file.txt", "w") as f:
+        f.write("dropped\n")
+    target = ("import gi\n"
+              "gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0')\n"
+              "from gi.repository import Gtk, Gdk, GLib\n"
+              "w = Gtk.Window(title='vm drop target'); w.set_default_size(400, 300); w.move(0, 0)\n"
+              "w.drag_dest_set(Gtk.DestDefaults.ALL, [Gtk.TargetEntry.new('text/uri-list', 0, 0)], Gdk.DragAction.COPY)\n"
+              "w.connect('drag-data-received', lambda *a: (print('RECEIVED', a[4].get_uris(), flush=True), GLib.timeout_add(300, Gtk.main_quit)))\n"
+              "w.show_all(); GLib.timeout_add(30000, Gtk.main_quit); Gtk.main()\n")
+    win = Chan("exec python3 -c \"" + target + "\"", user="tester", env=["DISPLAY=:0", "NO_AT_BRIDGE=1"])
+    time.sleep(4)
+    o, st = run(app_text("drop.sh"), user="tester", env=["DISPLAY=:0"])
+    got = win.lines(15, lambda l: l.startswith("RECEIVED"))
+    check("parity: a file dropped from Android reaches a GTK window in the VM (V10)",
+          st == 0 and any("file:///mnt/host/w/drop/dropped%20file.txt" in l for l in got), f"bsl-drop {st}: {o.strip()[-120:]} | {got[-2:]}")
+    win.close()
+    share_close(h)
+
+
+def v11_bench():
+    """Fast pixels (V11), recorded, not judged: W0's full-window 1080p redraw (XPutImage, no MIT-SHM, which cannot cross
+    the VM) through the display relay, against the same program on this container's X server directly."""
+    bench = ("import ctypes, time\n"
+             "x = ctypes.CDLL('libX11.so.6'); x.XOpenDisplay.restype = ctypes.c_void_p\n"
+             "x.XCreateSimpleWindow.restype = ctypes.c_ulong; x.XCreateGC.restype = ctypes.c_void_p\n"
+             "x.XCreateImage.restype = ctypes.c_void_p; x.XDefaultVisual.restype = ctypes.c_void_p; x.XRootWindow.restype = ctypes.c_ulong\n"
+             "d = x.XOpenDisplay(None); W, H = 1280, 720\n"
+             "w = x.XCreateSimpleWindow(ctypes.c_void_p(d), ctypes.c_ulong(x.XRootWindow(ctypes.c_void_p(d), 0)), 0, 0, W, H, 0, 0, 0)\n"
+             "x.XMapWindow(ctypes.c_void_p(d), ctypes.c_ulong(w)); x.XSync(ctypes.c_void_p(d), 0)\n"
+             "gc = x.XCreateGC(ctypes.c_void_p(d), ctypes.c_ulong(w), 0, None)\n"
+             "buf = ctypes.create_string_buffer(W * H * 4)\n"
+             "img = x.XCreateImage(ctypes.c_void_p(d), ctypes.c_void_p(x.XDefaultVisual(ctypes.c_void_p(d), 0)), 24, 2, 0, buf, W, H, 32, 0)\n"
+             "n, t0 = 0, time.time()\n"
+             "while time.time() - t0 < 4:\n"
+             "    x.XPutImage(ctypes.c_void_p(d), ctypes.c_ulong(w), ctypes.c_void_p(gc), ctypes.c_void_p(img), 0, 0, 0, 0, W, H); x.XSync(ctypes.c_void_p(d), 0); n += 1\n"
+             "print('FPS %.1f' % (n / (time.time() - t0)))\n")
+    o, st = run(f"python3 -c \"{bench}\"", user="tester", env=["DISPLAY=:0"])
+    local = subprocess.run(["python3", "-c", bench], env=dict(os.environ, DISPLAY=":5"), capture_output=True, text=True, timeout=60)
+    vm_fps = o.strip().split()[-1] if "FPS" in o else "?"
+    here = local.stdout.strip().split()[-1] if "FPS" in local.stdout else "?"
+    check("parity: redraw benchmark recorded (V11)", st == 0 and "FPS" in o,
+          f"1280x720 XPutImage through the relay {vm_fps} fps, straight to this X server {here} fps")
+
+
 # The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
 # channels to the guest relay on vsock 6000, the way the app's VmX11Relay does it.
 if os.path.exists("/usr/bin/Xvfb"):
@@ -717,7 +1198,14 @@ if os.path.exists("/usr/bin/Xvfb"):
         print("SKIP xfce (no desktop in this image)")
     else:
         check("xfce draws through the relay", st == 0 and o.split()[0] != "0", o.strip().replace("\n", " | "))
+    if PARITY_ON:
+        v12_mounts_open()
     bridges_test()
+    if PARITY_ON:
+        v12_bookmark_check()
+        v10_scale_test()
+        v10_drop_test()
+        v11_bench()
     desktop_test()
     xvfb.kill()
 
@@ -730,29 +1218,6 @@ files_test()
 # app/src/test/resources/vm/<name>, which VmInboundTest checks is the app's text. app_text() prints each one's sha256
 # ("SCRIPT <name> <sha256>"), and the parity gate's "same" evidence checks it against Android's copy, so a stale copy
 # here fails the cells it backs.
-
-_SCRIPTS = {}
-
-
-def app_text(name):
-    b = open("/t/" + name, "rb").read()
-    if name not in _SCRIPTS:
-        import hashlib
-        _SCRIPTS[name] = hashlib.sha256(b).hexdigest()
-        print(f"SCRIPT {name} {_SCRIPTS[name]}", flush=True)
-    return b.decode()
-
-
-def hangup(ch):
-    """What the app's closing of a channel is to the agent: shut down first, since Linux keeps a socket open under the
-    reader thread's blocked recv() (as files_test does)."""
-    import socket as so
-    try:
-        getattr(ch, "s", ch).shutdown(so.SHUT_RDWR)  # a Chan, or a bare channel socket (ssh_test's carry)
-    except OSError:
-        pass
-    ch.close()
-
 
 def relay_pool(port, target, size=2):
     """The app's VmSocketRelay: [size] idle channels to [port]; a channel's first bytes pair it with a new connection
@@ -1227,6 +1692,17 @@ if os.environ.get("PARITY", "1") == "1":
     ssh_test()
     ai_test()
     packages_test()
+    v12_mounts_close()
+    v12_sftp_test()
+    v14_print_test()
+    v14_camera_test()
+    v14_pad_test()
+    # Made as root in this container: qemu-test.sh, which is not, could not remove them from /w.
+    for _p in ("/w/v12", "/w/drop"):
+        __import__("shutil").rmtree(_p, ignore_errors=True)
+    for _p in ("/w/print-test.pdf",):
+        if os.path.exists(_p):
+            os.remove(_p)
 
 
 def stream_out(cmd, path):

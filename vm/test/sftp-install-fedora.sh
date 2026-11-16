@@ -1,0 +1,1 @@
+for s in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server; do [ -x "$s" ] && exit 0; done; d=$(command -v sshd) && [ -x "$(dirname "$(readlink -f "$d")")/../libexec/sftp-server" ] && exit 0; echo '[BSL] sftp-server is missing in the virtual machine; nothing was installed.' >&2; exit 1
