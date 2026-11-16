@@ -190,6 +190,129 @@ o, st = run(f"systemctl is-active {UNITS}; {B} status --json | head -c 400")
 check("parity: the agent's units and the generation after Repair (nix, V15)", o.split()[:3] == ["active"] * 3 and '"engine": "vm"' in o,
       o.strip().replace("\n", " ")[-300:])
 
+# The Files provider and controllers in NixOS's VM (plan 5.14 V12, V14; round 11, the vmparA loop): the app's own
+# texts as qemu-test.py runs them for the other families (sftp-guest.sh as the Linux user, which finds NixOS's
+# sftp-server beside sshd in the store; pad-feeder.sh as root, a uinput Xbox 360 pad). Not here: the home's Android
+# folders and SD cards (the module has no sshfs), printing and the camera (no breadstick-print or libbsl-cam for Nix).
+import struct  # noqa: E402
+
+
+class Chan:
+    """An agent 'r' run kept open, its output gathered by a thread (qemu-test.py's)."""
+
+    def __init__(self, cmd, user="root"):
+        self.s = bslvm.connect(args, bslvm.AGENT_PORT)
+        bslvm.request(self.s, "r", bslvm.run_payload(cmd, user, False))
+        self.buf, self.lock = bytearray(), threading.Lock()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            for t, d in bslvm.frames(self.s):
+                if t == "o":
+                    with self.lock:
+                        self.buf += d
+        except (OSError, EOFError):
+            pass
+
+    def send(self, data):
+        bslvm.send_frame(self.s, "d", data)
+
+    def take(self):
+        with self.lock:
+            b = bytes(self.buf)
+            self.buf.clear()
+            return b
+
+    def lines(self, timeout, until):
+        got, t0, rest = [], time.time(), b""
+        while time.time() - t0 < timeout:
+            rest += self.take()
+            while b"\n" in rest:
+                line, rest = rest.split(b"\n", 1)
+                got.append(line.decode("ascii", "replace"))
+                if until(got[-1]):
+                    return got
+            time.sleep(0.1)
+        return got
+
+    def close(self):
+        import socket as so
+        try:
+            self.s.shutdown(so.SHUT_RDWR)
+        except OSError:
+            pass
+        self.s.close()
+
+
+def sftp_call(ch, rest, t, body, ident):
+    ch.send(struct.pack(">I", 5 + len(body)) + bytes([t]) + struct.pack(">I", ident) + body)
+    t0 = time.time()
+    while time.time() - t0 < 15:
+        rest[0] += ch.take()
+        if len(rest[0]) >= 4:
+            n = struct.unpack(">I", rest[0][:4])[0]
+            if len(rest[0]) >= 4 + n:
+                p, rest[0] = rest[0][4:4 + n], rest[0][4 + n:]
+                return p[0], p[5:]
+        time.sleep(0.05)
+    raise TimeoutError("no SFTP reply")
+
+
+def sstr(x):
+    x = x.encode() if isinstance(x, str) else x
+    return struct.pack(">I", len(x)) + x
+
+
+ch = Chan(app_text("sftp-guest.sh"), user="tester")
+home, wrote = None, False
+try:
+    rest = [b""]
+    ch.send(struct.pack(">I", 5) + bytes([1]) + struct.pack(">I", 3))
+    t0 = time.time()
+    while len(rest[0]) < 9 and time.time() - t0 < 15:
+        rest[0] += ch.take()
+        time.sleep(0.05)
+    rest[0] = rest[0][4 + struct.unpack(">I", rest[0][:4])[0]:]
+    t, b = sftp_call(ch, rest, 16, sstr("."), 1)
+    home = b[8:8 + struct.unpack(">I", b[4:8])[0]].decode() if t == 104 else None
+    t, b = sftp_call(ch, rest, 3, sstr("from-provider.txt") + struct.pack(">II", 0x1A, 0), 2)
+    if t == 102:
+        h = b[4:4 + struct.unpack(">I", b[:4])[0]]
+        t2, b2 = sftp_call(ch, rest, 6, sstr(h) + struct.pack(">Q", 0) + sstr(b"written by the Files provider\n"), 3)
+        wrote = t2 == 101 and struct.unpack(">I", b2[:4])[0] == 0
+        sftp_call(ch, rest, 4, sstr(h), 4)
+except Exception as e:  # noqa: BLE001
+    home = repr(e)
+ch.close()
+o, st = run("stat -c %U /home/tester/from-provider.txt; cat /home/tester/from-provider.txt; rm -f /home/tester/from-provider.txt")
+check("parity: the Files provider reads and writes the VM user's home (V12)", home == "/home/tester" and wrote and o.startswith("tester"),
+      f"home {home!r}, wrote {wrote}: {o.strip()!r}")
+
+ch = Chan(app_text("pad-feeder.sh"))
+ch.send(b"S 0 0 0 0 0 0 0 0 0 0 Breadstick test pad\n")
+first = ch.lines(20, lambda l: l.startswith("ok") or l.startswith("error"))
+time.sleep(1.5)
+o, _ = run("for d in /sys/class/input/event*; do [ \"$(cat $d/device/name 2>/dev/null)\" = 'Breadstick test pad' ] && echo /dev/input/${d##*/}; done")
+dev = o.strip().split("\n")[0] if o.strip() else ""
+u = run(f"udevadm info --query=property --name={dev} 2>/dev/null | grep -E '^ID_INPUT_JOYSTICK=1'")[0] if dev else ""
+check("parity: a controller in the VM is a uinput Xbox 360 pad, a joystick to udev (V14)", bool(dev) and "ID_INPUT_JOYSTICK=1" in u,
+      f"{first} {dev} {u.strip()}")
+if dev:
+    reader = Chan("exec python3 -c \"import os,struct\nfd=os.open('" + dev + "',os.O_RDONLY)\n"
+                  "while True:\n b=os.read(fd,24)\n t,c,v=struct.unpack('HHi',b[16:24])\n"
+                  " print(t,c,v,flush=True)\n if t==1 and c==0x130 and v==1: break\"")
+    time.sleep(1)
+    ch.send(b"S 0 1 0 0 0 0 0 0 0 0 Breadstick test pad\n")
+    got = reader.lines(10, lambda l: l.strip() == "1 304 1")
+    check("parity: a button pressed on Android reaches evdev in the VM (V14)", "1 304 1" in [l.strip() for l in got], repr(got[-4:]))
+    reader.close()
+ch.send(b"R 0\n")
+time.sleep(1)
+o, _ = run("grep -l 'Breadstick test pad' /sys/class/input/*/device/name 2>/dev/null | wc -l")
+check("parity: a controller gone from Android leaves the VM (V14)", o.strip() == "0", o.strip())
+ch.close()
+
 bslvm.simple(args, "o", b"poweroff")
 try:
     q.wait(120)
