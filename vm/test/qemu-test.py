@@ -1646,6 +1646,16 @@ def packages_test():
     o2, _ = run("[ ! -e /var/lib/breadstick/package-run.cut ] || echo 'BSL-RUN cut'")
     check("parity: the start's record probe says what is kept (V16)", ("BSL-RUN cut" in o2) == ("cut" in left), o2.strip() + " | " + left.strip())
     run(f"rm -f {m}.cut")
+    # V16 (c): a record with no marker (round 11 review). Fedora's start looks at it again, as proot's
+    # (interruptedPackageRun); Arch's runs nothing for it and keeps it for Updates, with the banner.
+    run(f"printf 'kind=upgrade\\nstart=%s\\n' \"$(date +%s)\" > {m}.cut")
+    o, _ = run(app_text(f"pkg-recover-{DISTRO}.sh"))
+    if DISTRO == "fedora":
+        ok = "BSL-RUN check" in o and re.search(r"^BSL-RUN exit \d+", o, re.M) is not None
+    else:
+        ok = "BSL-RUN check" not in o and "BSL-RUN cut" in o and "No package run was cut off." not in o
+    check(f"parity: a record alone, no marker ({DISTRO}, V16)", ok, o.strip().replace("\n", " | ")[-300:])
+    run(f"rm -f {m}.cut {m}.cut.verify")
 
     # V15: Updates' check and Repair as the app runs them in the VM (its family's own, under the marker).
     h = None
@@ -1672,10 +1682,39 @@ def packages_test():
     if DISTRO == "archlinux" and not heavy:
         print("SKIP packages (V15): Arch's Repair and Updates are full upgrades (HEAVY=1 to run them under TCG)")
     else:
+        # Something for Repair to fix, so a Repair that does nothing fails (round 11 review: two echo lines passed).
+        # Fedora: a package a cut-off update left unfinished, one of its files changed and named in the record as
+        # bsl_pkg_mend reads it (dnf-open=<transaction> <package>); Repair reinstalls it from the stage, rpm -V is clean
+        # after, and the record is settled only then. Arch: pacman's lock left by a pacman that is gone.
+        probe = ""
+        if DISTRO == "fedora":
+            o, _ = run("for p in $(rpm -qa 'breadstick-*' --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' | sort); do "
+                       "[ -n \"$(find /bsl-stage -name \"$p.rpm\" 2>/dev/null | head -n 1)\" ] || continue; "
+                       "f=$(rpm -q --qf '[%{FILEFLAGS} %{FILEMODES:perms} %{FILENAMES}\\n]' \"$p\" | awk '$1 == 0 && $2 ~ /^-/ { print $3; exit }'); "
+                       "[ -n \"$f\" ] && [ -f \"$f\" ] && { echo \"$p $f\"; break; }; done")
+            pick = o.split()
+            if len(pick) != 2:
+                check("parity: Repair's test package, an installed one the stage has (fedora, V15)", False, o.strip())
+            else:
+                nevra, path = pick
+                name = re.sub(r"-[^-]+-[^-]+\.[^.]+$", "", nevra)
+                o, _ = run(f"printf '\\n# r11 repair probe\\n' >> '{path}'; "
+                           f"printf 'kind=upgrade\\nstart=%s\\ndnf-open=1 %s\\n' \"$(date +%s)\" '{nevra}' > {m}.cut; "
+                           f"rpm -V --nomtime --noconfig --nodeps --noscripts '{name}' >/dev/null 2>&1 || echo changed")
+                check("parity: Repair's test package is changed before Repair (fedora, V15)", "changed" in o, f"{nevra} {path}: {o.strip()}")
+                probe = f"rpm -V --nomtime --noconfig --nodeps --noscripts '{name}' >/dev/null 2>&1 && echo verified; true"
+        else:
+            run("pgrep -x pacman >/dev/null || touch /var/lib/pacman/db.lck")
+            probe = "test -e /var/lib/pacman/db.lck || echo unlocked"
         o, st = run(app_text(f"repair-{DISTRO}.sh"))
         left, _ = run(f"test -e {m} && echo marker; test -e {m}.cut && echo cut; true")
-        check(f"parity: Repair in the VM ({DISTRO}, V15)", st == 0 and "checking the package database" in o and left.strip() == "",
-              f"exit {st} {left.strip()}: " + " | ".join(o.strip().splitlines()[-4:])[-300:])
+        fixed, _ = run(probe) if probe else ("", 0)
+        want = "verified" if DISTRO == "fedora" else "unlocked"
+        check(f"parity: Repair in the VM ({DISTRO}, V15)",
+              st == 0 and "checking the package database" in o and left.strip() == "" and want in fixed
+              and (DISTRO != "fedora" or "do not match the package database; reinstalling" in o),
+              f"exit {st} {left.strip()} {fixed.strip()}: " + " | ".join(o.strip().splitlines()[-4:])[-300:])
+        run(f"rm -f {m}.cut {m}.cut.verify")
         # Arch's Updates (upgrade-archlinux.sh) also installs breadstick-desktop from [breadstick] when it is missing,
         # which this test VM cannot reach until 4.0's publish: not run here (gate-distro.sh runs it on proot).
     if DISTRO == "archlinux":
