@@ -10,9 +10,22 @@ if ! id -u "$u" >/dev/null 2>&1; then
   # /bin/bash where it is (Debian's passwd line unchanged), else the system's bash (NixOS), else sh.
   sh=/bin/bash
   [ -x "$sh" ] || sh=$(command -v bash 2>/dev/null) || sh=/bin/sh
-  useradd -m -s "$sh" ${groups:+-G "$groups"} "$u" 2>/dev/null || useradd -m -s "$sh" ${admin:+-G "$admin"} "$u" || exit 1
+  # NixOS: uid 1000 with a group of its own, 1000 (round 12, R11-4). Its useradd gave the group users (100):
+  # NixOS's login.defs has no USERGROUPS_ENAB, where Debian's, Fedora's and Arch's make the user's own group.
+  # The proot account is uid 1000 with group 1000 (setup-user.sh), and a move between engines keeps owners.
+  own=
+  if [ -e "$etc/NIXOS" ]; then
+    if has "$u"; then own="-g $u"; else own=-U; fi
+    getent passwd 1000 >/dev/null 2>&1 || own="$own -u 1000"
+  fi
+  useradd -m -s "$sh" $own ${groups:+-G "$groups"} "$u" 2>/dev/null || useradd -m -s "$sh" $own ${admin:+-G "$admin"} "$u" || exit 1
   passwd -d "$u" >/dev/null 2>&1 || true
   made=1
+  # The account in local.json, as the proot account step records it (bsl-nix account): every generation keeps
+  # it, and a move to the Standard engine finds it.
+  if [ -e "$etc/NIXOS" ] && [ -x /nix/var/nix/profiles/system/sw/bin/bsl-nix ]; then
+    /nix/var/nix/profiles/system/sw/bin/bsl-nix account "$u" </dev/null >/dev/null 2>&1 || echo "bsl-nix account failed"
+  fi
 fi
 f="$etc/sudoers.d/breadstick-vm"
 if [ -n "${made:-}" ] && [ -n "$admin" ] && [ -d "$etc/sudoers.d" ] && [ ! -e "$f" ] && [ ! -L "$f" ]; then

@@ -11,6 +11,13 @@ rm -f /var/lib/breadstick-vm/restore-left-out
 mkdir -p "$w"
 chmod 0700 "$w"
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
+if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ]; then
+  grep -vxF ./nix/store "$w/mounts" > "$w/mounts.1" || true
+  mv -f "$w/mounts.1" "$w/mounts"
+  if awk '$5 == "/nix/store" { f = 1 } END { exit !f }' /proc/self/mountinfo; then
+    mount -o remount,bind,rw /nix/store 2>/dev/null || mount -o remount,rw /nix/store
+  fi
+fi
 cd "$s"
 tar --create --file=- --format=posix --numeric-owner --xattrs --xattrs-include='*' --exclude-from="$w/mounts" --exclude='./usr/lib/breadstick-vm' --exclude='./etc/systemd/system/bsl-*' --exclude='./etc/systemd/system/*.wants/bsl-*' --exclude='./etc/fstab' --exclude='./etc/modules-load.d/breadstick-vm.conf' --exclude='./etc/systemd/journald.conf.d/breadstick-vm.conf' --exclude='./etc/systemd/zram-generator.conf' --exclude='./etc/profile.d/breadstick-vm.sh' --exclude='./etc/sudoers.d/breadstick-vm' --exclude='./etc/hostname' --exclude='./etc/hosts' --exclude='./etc/resolv.conf' --exclude='./etc/machine-id' . \
   | tar --extract --file=- --directory=/ --numeric-owner --same-permissions --xattrs --xattrs-include='*' --keep-directory-symlink

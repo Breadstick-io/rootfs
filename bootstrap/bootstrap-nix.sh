@@ -78,7 +78,14 @@ STATE_VERSION="26.05"
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 STAMP="${STAMP:-$(date -u +%Y%m%d%H%M)}"
 case "$STAMP" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "ERROR: STAMP must be YYYYMMDDHHMM" >&2; exit 1 ;; esac
-LEVEL="${BAKE_ZSTD_LEVEL:-19}"
+# zstd --ultra -22 with a 128 MiB window (--long=27, round 12): the store's many copies of the same libraries lie far
+# apart in the tar, and a long window finds them. Measured on round 11's trimmed arm64 desktop image: 497,583,098 bytes
+# at level 19, 445,782,682 at -22 --long=27 (10% smaller). 27 is libzstd's default window limit for decoding
+# (ZSTD_WINDOWLOG_LIMIT_DEFAULT), so the app's zstd-jni ZstdInputStream reads it with no setting changed; never more.
+LEVEL="${BAKE_ZSTD_LEVEL:-22}"
+LONG="${BAKE_ZSTD_LONG:-27}"
+case "$LONG" in ''|0) ZSTD_LONG= ;; 1[0-9]|2[0-7]) ZSTD_LONG="--long=$LONG" ;; *) echo "ERROR: BAKE_ZSTD_LONG is 10 to 27 (the app decodes no larger window), or 0" >&2; exit 1 ;; esac
+ZSTD_ULTRA=; [ "$LEVEL" -gt 19 ] && ZSTD_ULTRA=--ultra
 RUN="${RUN:-nixbake}"
 case "$RUN" in *[!a-z0-9-]*|''|-*) echo "ERROR: RUN is lowercase letters, digits and -" >&2; exit 1 ;; esac
 case "${KEEP_STORE:-}" in ''|1) ;; *) echo "ERROR: KEEP_STORE is 1 or unset" >&2; exit 1 ;; esac
@@ -112,7 +119,7 @@ cleanup() {
   if [ -d "$WORK/out/root" ]; then
     docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/root 2>/dev/null; rm -rf /out/root' >/dev/null 2>&1 || true
   fi
-  [ -d "$WORK/out" ] && docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'rm -rf /out/system-path /out/nixpkgs-path /out/vm' >/dev/null 2>&1 || true
+  [ -d "$WORK/out" ] && docker run --rm --name "$C-clean" --platform "linux/$HOST" -v "$WORK/out:/out" "$NIX_IMAGE" sh -c 'chmod -R u+w /out/vmroot 2>/dev/null; rm -rf /out/system-path /out/nixpkgs-path /out/vm /out/vmroot' >/dev/null 2>&1 || true
   docker rm -f "$C-clean" >/dev/null 2>&1 || true
   if [ "${KEEP_STORE:-}" = 1 ]; then
     echo "[bake-nix] the Nix store volume $VOL is kept (KEEP_STORE=1; docker volume rm $VOL removes it)" >&2
@@ -196,6 +203,80 @@ chmod 0644 /out/vm/*
 for f in toplevel kernel-version nixpkgs; do cp "$V/$f" /out/vm/$f; done
 echo "[vmstep] done"
 BSL_NIX_VMSTEP_END
+
+# The VM image without a helper VM (VM_ROUTE=tree; round 12): the system built and copied into a root tree with its
+# own Nix database exactly as the proot image is (nix copy --to local?root=), the system profile set, and the tree made
+# into the ext4 disk labeled bslroot by mkfs.ext4 -d. make-disk-image boots a helper VM, which for an amd64 image on
+# this arm64 host is TCG ("hours"); this route builds the amd64 one under qemu-user like the proot image. What
+# make-disk-image added besides: switch-to-configuration boot's /sbin/init, which nothing starts (the kernel line names
+# the profile's init). The first boot's stage 2 activates the system, as on make-disk-image's disk.
+cat > "$WORK/vmtree.sh" <<'BSL_NIX_VMTREE_END'
+#!/bin/sh
+set -eu
+export NIX_CONFIG="sandbox = false
+filter-syscalls = false
+experimental-features = nix-command
+extra-platforms = $NIXSYS
+max-jobs = auto
+substituters = https://cache.nixos.org
+trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+NP=$(nix-prefetch-url --unpack --print-path --name "nixpkgs-$RELEASE" "$NIXPKGS_URL" | tail -n 2)
+NP_SHA=$(echo "$NP" | head -n 1); NP_PATH=$(echo "$NP" | tail -n 1)
+if [ -n "$NIXPKGS_SHA256" ] && [ "$NP_SHA" != "$NIXPKGS_SHA256" ]; then
+  echo "ERROR: nixpkgs is $NP_SHA, not the pinned $NIXPKGS_SHA256" >&2; exit 1
+fi
+mkdir -p /etc/breadstick /etc/nixos
+rm -rf /etc/breadstick/nix
+cp -r /cfg/etc-nix /etc/breadstick/nix
+cp /cfg/configuration.nix /etc/nixos/configuration.nix
+ln -sfn "$NP_PATH" /etc/breadstick/nix/nixpkgs
+cat > /etc/breadstick/nix/local.json <<EOF
+{
+  "channel": "stable",
+  "desktop": true,
+  "engine": "vm",
+  "imageTrim": false,
+  "stateVersion": "$STATE_VERSION",
+  "user": ""
+}
+EOF
+printf '{\n  "channel": "stable",\n  "path": "%s",\n  "release": "%s",\n  "sha256": "%s",\n  "url": "%s"\n}\n' \
+  "$NP_PATH" "$RELEASE" "$NP_SHA" "$NIXPKGS_URL" > /etc/breadstick/nix/nixpkgs.json
+export NIX_PATH="nixpkgs=/etc/breadstick/nix/nixpkgs:nixos-config=/etc/nixos/configuration.nix"
+echo "[vmtree] building the VM system for $NIXSYS"
+SYS=$(nix-build '<nixpkgs/nixos>' -A system --argstr system "$NIXSYS" --no-out-link)
+[ -e "$SYS/kernel" ] && [ -e "$SYS/initrd" ] || { echo "ERROR: $SYS has no kernel or initrd" >&2; exit 1; }
+R=/out/vmroot
+rm -rf "$R"; mkdir -p "$R"
+nix copy --no-check-sigs --to "local?root=$R" "$SYS" "$NP_PATH"
+nix-env --store "local?root=$R" -p "$R/nix/var/nix/profiles/system" --set "$SYS"
+rm -f "$R"/nix/var/nix/gcroots/auto/*
+ln -sfn "$NP_PATH" "$R/nix/var/nix/gcroots/breadstick-nixpkgs"
+mkdir -p "$R/etc/breadstick" "$R/etc/nixos" "$R/tmp" "$R/root" "$R/proc" "$R/dev" "$R/sys" "$R/run" "$R/var" \
+  "$R/home" "$R/mnt" "$R/boot"
+chmod 1777 "$R/tmp"; chmod 0700 "$R/root"
+cp -r /etc/breadstick/nix "$R/etc/breadstick/nix"
+cp /etc/nixos/configuration.nix "$R/etc/nixos/configuration.nix"
+: > "$R/etc/NIXOS"
+# The disk: this host's mkfs.ext4 from the same nixpkgs; the tree's size and a tenth more, 1 GiB free (as
+# make-disk-image's additionalSpace), and an inode for every file with room to spare.
+E2=$(nix-build "$NP_PATH" -A e2fsprogs.bin --no-out-link 2>/dev/null || nix-build "$NP_PATH" -A e2fsprogs --no-out-link)
+BYTES=$(du -sb "$R" | cut -f1); FILES=$(find "$R" | wc -l)
+MIB=$(( (BYTES / 10 * 11 + 1073741824) / 1048576 + 1 ))
+mkdir -p /out/vm
+rm -f /out/vm/root.img
+truncate -s "${MIB}M" /out/vm/root.img
+"$E2/bin/mkfs.ext4" -q -F -L bslroot -N $(( FILES * 3 / 2 + 65536 )) -E root_owner=0:0 -d "$R" /out/vm/root.img
+"$E2/bin/e2fsck" -fn /out/vm/root.img >/dev/null
+cp -L "$SYS/kernel" /out/vm/vmlinuz
+cp -L "$SYS/initrd" /out/vm/initrd.img
+chmod 0644 /out/vm/*
+echo "$SYS" > /out/vm/toplevel
+ls "$SYS/kernel-modules/lib/modules" | head -n 1 > /out/vm/kernel-version
+echo "$NP_PATH" > /out/vm/nixpkgs
+chmod -R u+w "$R"; rm -rf "$R"
+echo "[vmtree] done (${MIB} MiB disk, $FILES files)"
+BSL_NIX_VMTREE_END
 
 cat > "$WORK/step.sh" <<'BSL_NIX_STEP_END'
 #!/bin/sh
@@ -310,7 +391,7 @@ build_one() {  # $1 = base|desktop, $2 = 1 trimmed; writes $3 (.unchecked)
   log "writing $(basename "$3")"
   # As root (the tree's files are the container's root's): numeric owner 0, the store's modes kept.
   docker run --rm --name "$C-tar" --platform "linux/$HOST" -v "$OUTV:/out" -v "$VOL:/nix" "$NIX_IMAGE" \
-    sh -c 'cd /out/root && tar --numeric-owner --owner=0 --group=0 -cf - .' | zstd -q -"$LEVEL" -T0 -o "$3.unchecked"
+    sh -c 'cd /out/root && tar --numeric-owner --owner=0 --group=0 -cf - .' | zstd -q $ZSTD_ULTRA -"$LEVEL" $ZSTD_LONG -T0 -o "$3.unchecked"
   zstd -q -t "$3.unchecked"
 }
 check_one() {  # $1 = base|desktop, $2 = tarball
@@ -343,17 +424,33 @@ write_manifest() {  # $1 = base|desktop, $2 = tarball
 }
 
 if [ "$WHAT" = vm ]; then
-  [ -e /dev/kvm ] || { echo "ERROR: the VM image's build needs /dev/kvm" >&2; exit 1; }
+  # VM_ROUTE: disk-image (nixpkgs' make-disk-image, a helper VM under /dev/kvm: this host's architecture) or tree (no
+  # helper VM, round 12: the amd64 image on this arm64 host). The default is disk-image where it can run, else tree.
+  VM_ROUTE="${VM_ROUTE:-}"
+  if [ -z "$VM_ROUTE" ]; then
+    if [ "$ARCH" = "$HOST" ] && [ -e /dev/kvm ]; then VM_ROUTE=disk-image; else VM_ROUTE=tree; fi
+  fi
+  case "$VM_ROUTE" in disk-image|tree) ;; *) echo "ERROR: VM_ROUTE is disk-image or tree" >&2; exit 1 ;; esac
+  [ "$VM_ROUTE" = tree ] || [ -e /dev/kvm ] || { echo "ERROR: the VM image's build needs /dev/kvm (or VM_ROUTE=tree)" >&2; exit 1; }
   NAME="nixos-$(echo "$RELEASE" | sed -E 's/^nixos-([0-9]+\.[0-9]+).*/\1/')-$ARCH-vm-$STAMP"
   VOUT="$OUT_DIR/vm/$NAME"
   mkdir -p "$VOUT"
   log "building $NAME"
   docker rm -f "$C" >/dev/null 2>&1 || true
+  log "route: $VM_ROUTE"
+  if [ "$VM_ROUTE" = tree ]; then
+    docker run --name "$C" --platform "linux/$HOST" \
+      -e NIXSYS="$NIXSYS" -e RELEASE="$RELEASE" -e NIXPKGS_URL="$NIXPKGS_URL" -e NIXPKGS_SHA256="$NIXPKGS_SHA256" \
+      -e STATE_VERSION="$STATE_VERSION" \
+      -v "$WORK/etc-nix:/cfg/etc-nix:ro" -v "$WORK/configuration.nix:/cfg/configuration.nix:ro" \
+      -v "$WORK/vmtree.sh:/vmtree.sh:ro" -v "$OUTV:/out" -v "$VOL:/nix" "$NIX_IMAGE" sh /vmtree.sh
+  else
   docker run --name "$C" --platform "linux/$HOST" --device /dev/kvm \
     -e NIXSYS="$NIXSYS" -e RELEASE="$RELEASE" -e NIXPKGS_URL="$NIXPKGS_URL" -e STATE_VERSION="$STATE_VERSION" \
     -v "$WORK/etc-nix:/cfg/etc-nix:ro" -v "$WORK/configuration.nix:/cfg/configuration.nix:ro" \
     -v "$WORK/vm-image.nix:/cfg/vm-image.nix:ro" -v "$WORK/vmstep.sh:/vmstep.sh:ro" -v "$OUTV:/out" \
     -v "$VOL:/nix" "$NIX_IMAGE" sh /vmstep.sh
+  fi
   docker rm -f "$C" >/dev/null
   docker run --rm --name "$C-chown" --platform "linux/$HOST" -v "$OUTV:/out" "$NIX_IMAGE" sh -c 'chown -R '"$(id -u):$(id -g)"' /out/vm'
   cp "$OUTV/vm/vmlinuz" "$OUTV/vm/initrd.img" "$VOUT/"

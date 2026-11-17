@@ -18,7 +18,20 @@ if command -v rpm >/dev/null 2>&1; then
   if [ "${d#/}" != "$d" ] && [ -d "$d" ]; then cp -a "$d" "$w/rpmdb"; fi
 fi
 if [ -d /var/lib/pacman/local ]; then mkdir -p "$w/pacdb" && cp -a /var/lib/pacman/local "$w/pacdb/local"; fi
+if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ] && [ -d "$s/nix/var/nix/db" ]; then
+  systemctl stop nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+  NIX_REMOTE=local nix-store --dump-db > "$w/nix-db"
+  [ -s "$w/nix-db" ] || { echo "no dump of the virtual machine's Nix database"; exit 4; }
+  rm -f /nix/var/nix/db/db.sqlite-wal /nix/var/nix/db/db.sqlite-shm
+fi
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
+if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ]; then
+  grep -vxF ./nix/store "$w/mounts" > "$w/mounts.1" || true
+  mv -f "$w/mounts.1" "$w/mounts"
+  if awk '$5 == "/nix/store" { f = 1 } END { exit !f }' /proc/self/mountinfo; then
+    mount -o remount,bind,rw /nix/store 2>/dev/null || mount -o remount,rw /nix/store
+  fi
+fi
 cd "$s"
 tar --create --file=- --format=posix --numeric-owner --xattrs --xattrs-include='*' --exclude-from="$w/mounts" --exclude='./usr/lib/breadstick-vm' --exclude='./etc/systemd/system/bsl-*' --exclude='./etc/systemd/system/*.wants/bsl-*' --exclude='./etc/fstab' --exclude='./etc/modules-load.d/breadstick-vm.conf' --exclude='./etc/systemd/journald.conf.d/breadstick-vm.conf' --exclude='./etc/systemd/zram-generator.conf' --exclude='./etc/profile.d/breadstick-vm.sh' --exclude='./etc/sudoers.d/breadstick-vm' --exclude='./etc/hostname' --exclude='./etc/hosts' --exclude='./etc/resolv.conf' --exclude='./etc/machine-id' . \
   | tar --extract --file=- --directory=/ --numeric-owner --same-permissions --xattrs --xattrs-include='*' --keep-directory-symlink --no-overwrite-dir
@@ -436,6 +449,28 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
   r=$?
   set -e
   [ "$r" = 0 ] || echo "package database (pacman): not checked (exit $r)"
+fi
+if [ -s "$w/nix-db" ]; then
+  set +e
+  ( set -e
+    export NIX_REMOTE=local
+    nix-store --load-db < "$w/nix-db"
+    j=/etc/breadstick/nix/local.json
+    if grep -q '"engine"' "$j"; then
+      sed -i 's/\("engine"[[:space:]]*:[[:space:]]*\)"[^"]*"/\1"vm"/' "$j"
+    else
+      sed -i '0,/{/s//{\n  "engine": "vm",/' "$j"
+    fi
+    export NIX_PATH="nixpkgs=/etc/breadstick/nix/nixpkgs:nixos-config=/etc/nixos/configuration.nix"
+    sys=$(nix-build '<nixpkgs/nixos>' -A system --no-out-link 2>>/var/log/breadstick-vm-restore.log)
+    [ -e "$sys/kernel" ] && [ -e "$sys/init" ]
+    nix-env -p /nix/var/nix/profiles/system --set "$sys"
+    "$sys/bin/switch-to-configuration" boot >>/var/log/breadstick-vm-restore.log 2>&1
+    echo "nix: the generation for the virtual machine is $sys"
+  )
+  r=$?
+  set -e
+  [ "$r" -eq 0 ] || { echo "the Nix based instance could not be built for the virtual machine (status $r)"; exit 4; }
 fi
 rm -rf "$s" "$w"
 sync
