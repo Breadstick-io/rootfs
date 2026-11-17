@@ -4,7 +4,8 @@
 # runs them through its agent. Two restores: a proot system's backup (made from a copy of this system with proot's
 # stand-ins, Arch's masks and DisableSandbox line put in, every folder 0755 as a 3.x backup stores them, and files the
 # image never had) and then a VM's own backup (file-backup.sh of the system as it is then). Prints one "name: value"
-# line per check. Destroys the container's system on purpose: never run it anywhere else.
+# line per check. Then (round 12 review) a NixOS-shaped VM restore whose tools are store paths the backup lacks.
+# Destroys the container's system on purpose: never run it anywhere else.
 set -u
 [ -f /.dockerenv ] || { echo "only inside the test's container" >&2; exit 2; }
 say() { printf '%s: %s\n' "$1" "$2"; }
@@ -130,4 +131,22 @@ mkdir -p $S && printf 'x\n' > $S/x
 sh /t/file-restore.sh > /tmp/r3.log 2>&1
 say empty-stage-rc "$?"
 say empty-stage-kept "$(yn test -f /etc/bsl-from-backup.conf)"
+# 5. Round 12 review: the Nix based instance's own VM backup restored over it after `bsl-nix update` and `bsl-nix gc`.
+# NixOS's marker and a store (here not a mount; the restore makes the real one writable): the backup has the old
+# generation's path, the running system then has only a newer one, and the restore runs with its tools from that newer
+# path, as NixOS's do. No store path is taken away: the backup's comes back, the running one stays, the restore ends.
+rm -rf $S
+touch /etc/NIXOS
+old=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-old
+new=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-coreutils-9.7
+mkdir -p $old /nix/var/nix/db && printf 'old\n' > $old/marker && printf 'db\n' > /nix/var/nix/db/db.sqlite
+sh /t/file-backup.sh > /tmp/nix.tar
+mkdir -p $new/bin
+for t in rm rmdir mv mkdir chmod sort grep find tar wc sync awk cat; do cp "$(command -v $t)" $new/bin/; done
+rm -rf $old
+sh /t/file-unpack-vm.sh < /tmp/nix.tar > /tmp/u4.log 2>&1
+PATH=$new/bin:$PATH sh /t/file-restore.sh > /tmp/r4.log 2>&1
+say nix-restore-rc "$?"
+say nix-restore-said "$(tail -n 1 /tmp/r4.log)"
+say nix-store "$(cat $old/marker 2>/dev/null) $(yn test -x $new/bin/rm) $(yn test -x $new/bin/tar) $(cat /nix/var/nix/db/db.sqlite)"
 exit 0

@@ -25,7 +25,9 @@ if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ] && [ -d "$s/nix/var/nix/db" ]; the
   rm -f /nix/var/nix/db/db.sqlite-wal /nix/var/nix/db/db.sqlite-shm
 fi
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
+nixw=
 if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ]; then
+  nixw=1
   grep -vxF ./nix/store "$w/mounts" > "$w/mounts.1" || true
   echo ./var/empty >> "$w/mounts.1"
   mv -f "$w/mounts.1" "$w/mounts"
@@ -53,6 +55,10 @@ while IFS= read -r p; do
   case "$p" in /|/usr/lib/breadstick-vm|/etc/systemd/system/bsl-*|/etc/systemd/system/*.wants/bsl-*|/etc/fstab|/etc/modules-load.d/breadstick-vm.conf|/etc/systemd/journald.conf.d/breadstick-vm.conf|/etc/systemd/zram-generator.conf|/etc/profile.d/breadstick-vm.sh|/etc/sudoers.d/breadstick-vm|/etc/hostname|/etc/hosts|/etc/resolv.conf|/etc/machine-id|/var/log/breadstick-vm-*) continue ;; esac
   printf '%s\n' "$p"
 done < "$w/all" > "$w/gone"
+if [ -n "$nixw" ]; then
+  grep -v '^/nix/store/' "$w/gone" > "$w/gone.1" || true
+  mv -f "$w/gone.1" "$w/gone"
+fi
 l=/var/lib/breadstick-vm/image-files.gz
 if [ -s "$l" ] && gzip -dc "$l" > "$w/image"; then
   grep -vxF -f "$w/image" "$w/gone" > "$w/gone.1" || true
@@ -464,7 +470,7 @@ if [ -s "$w/nix-db" ]; then
     fi
     export NIX_PATH="nixpkgs=/etc/breadstick/nix/nixpkgs:nixos-config=/etc/nixos/configuration.nix"
     sys=$(nix-build '<nixpkgs/nixos>' -A system --no-out-link 2>>/var/log/breadstick-vm-restore.log)
-    [ -e "$sys/kernel" ] && [ -e "$sys/init" ]
+    [ -e "$sys/kernel" ] && [ -e "$sys/init" ] || { echo "no kernel in $sys"; exit 4; }
     nix-env -p /nix/var/nix/profiles/system --set "$sys"
     "$sys/bin/switch-to-configuration" boot >>/var/log/breadstick-vm-restore.log 2>&1
     echo "nix: the generation for the virtual machine is $sys"

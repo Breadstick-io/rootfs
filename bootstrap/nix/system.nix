@@ -3,7 +3,8 @@
 #
 #   local.json      this system's own settings (the engine, the Linux account, the NixOS release it started on, the
 #                   user's languages), written by the bake, `bsl-nix account` and `bsl-nix languages`. The engine is the
-#                   bake's: a system does not move between engines yet (a backup restores only on its own engine)
+#                   bake's until the instance moves to the other engine (the app's move builds the configuration
+#                   for that engine and writes it here); any other backup restores only on its own engine
 #   breadstick.nix  the packages the Nix packages page manages (packages.json), in Settings and Linux Settings
 #   module/         Breadstick's NixOS module and package overlay (packages' breadstick-nix/nix)
 #   src/            Breadstick's package sources the overlay builds (no binary cache serves them yet)

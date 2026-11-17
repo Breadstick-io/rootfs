@@ -11,7 +11,9 @@ rm -f /var/lib/breadstick-vm/restore-left-out
 mkdir -p "$w"
 chmod 0700 "$w"
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
+nixw=
 if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ]; then
+  nixw=1
   grep -vxF ./nix/store "$w/mounts" > "$w/mounts.1" || true
   echo ./var/empty >> "$w/mounts.1"
   mv -f "$w/mounts.1" "$w/mounts"
@@ -29,6 +31,10 @@ while IFS= read -r p; do
   case "$p" in /|/usr/lib/breadstick-vm|/etc/systemd/system/bsl-*|/etc/systemd/system/*.wants/bsl-*|/etc/fstab|/etc/modules-load.d/breadstick-vm.conf|/etc/systemd/journald.conf.d/breadstick-vm.conf|/etc/systemd/zram-generator.conf|/etc/profile.d/breadstick-vm.sh|/etc/sudoers.d/breadstick-vm|/etc/hostname|/etc/hosts|/etc/resolv.conf|/etc/machine-id|/var/log/breadstick-vm-*) continue ;; esac
   printf '%s\n' "$p"
 done < "$w/all" > "$w/gone"
+if [ -n "$nixw" ]; then
+  grep -v '^/nix/store/' "$w/gone" > "$w/gone.1" || true
+  mv -f "$w/gone.1" "$w/gone"
+fi
 sort -r "$w/gone" | while IFS= read -r p; do
   if [ -d "$p" ] && [ ! -L "$p" ]; then rmdir "$p" 2>/dev/null || true; else rm -f "$p" || true; fi
 done

@@ -5,7 +5,7 @@
 # review: a proot system's backup restored into the VM gets the image's programs for proot's stand-ins, loses Arch's
 # masks and DisableSandbox line, keeps the image's folder modes, owners and own files, the VM's hosts file and guest,
 # and loses every file the system got after the image that the backup does not have; a VM's own backup comes back
-# exactly. Both keep the running VM's /etc/machine-id. Round 10 (M6): after the proot restore dpkg's database lists the VM
+# exactly. Both keep the running VM's /etc/machine-id. Round 12 review: a NixOS-shaped VM restore takes no store path away. Round 10 (M6): after the proot restore dpkg's database lists the VM
 # image's own package again, never one the restore took away, nothing twice. Exit 1 on any difference from the lines below. qemu-test.py runs the same scripts in a booted VM.
 #
 #   vm/test/file-restore-docker.sh
@@ -38,6 +38,9 @@ vm-left: yes yes
 vm-machine-id: fedcba9876543210fedcba9876543210
 empty-stage-rc: 3
 empty-stage-kept: yes
+nix-restore-rc: 0
+nix-restore-said: restored
+nix-store: old yes yes db
 BSL_FRD_WANT_4k8
 }
 got=$(docker run --rm --network none --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vm-frd-$$}" \
