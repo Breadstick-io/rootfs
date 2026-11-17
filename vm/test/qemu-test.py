@@ -1863,10 +1863,10 @@ def kernel_prepare():
 
 
 def kernel_retake():
-    """After the package checks (which run the app's Updates and Repair, full upgrades on Arch with HEAVY=1): the pair
-    the disk boots now, copied out again when it changed, as the app copies the pair whenever it changes. Arch's
-    kernel test installs an older linux, which a full upgrade then replaces; the pair copied before would name
-    modules that are gone. Fedora's newest kernel is already in, so its pair stays (round 12, debfix)."""
+    """After the package checks (the app's Updates and Repair, vmparC's Get apps bundles), on a system whose kernel
+    test ran first (KERNEL_FIRST): the pair the disk boots now, copied out again when they moved it, as the app copies
+    the pair whenever it changes, so the boots after test the pair the disk really has. Fedora's newest kernel is
+    already in, so its pair stays (round 12, debfix)."""
     if "new" not in KERNEL:
         return
     q3 = boot_pair()
@@ -1924,7 +1924,14 @@ def kernel_boots():
 # kernel test found "no newer kernel" and V7 went untested. The app's commands are not edited to leave kernels out
 # (the test runs them as users get them); the kernel test runs first instead, as a user's first update would bring
 # the kernel, and the package checks then run on a disk that already has it (dnf has no newer kernel to bring).
-kernel_prepare()
+# Arch keeps its old place, after the file backup: its kernel test installs an OLDER linux from Arch's archive while
+# the image's runs, keep-modules keeps the running kernel's modules folder, and any later full upgrade (Repair and
+# Updates with HEAVY=1, vmparC's Get apps bundles, which sync first) brings the newer linux back and stops at "linux:
+# /usr/lib/modules/<running>/modules.order exists in filesystem" (round 12, debfix, Arch amd64 HEAVY=1). Arch's
+# package checks never bring a kernel the kernel test needs, so it loses nothing there.
+KERNEL_FIRST = DISTRO != "archlinux"
+if KERNEL_FIRST:
+    kernel_prepare()
 
 if os.environ.get("PARITY", "1") == "1":
     engine_test()
@@ -2163,6 +2170,8 @@ def file_backup_test():
 
 tabs_test()
 file_backup_test()
+if not KERNEL_FIRST:
+    kernel_prepare()
 
 
 
