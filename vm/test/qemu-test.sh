@@ -69,5 +69,8 @@ if [ -n "${STAGED_REPO:-}" ]; then
   [ -s "$STAGED_REPO/dists/${STAGED_SUITE:-breadstick}/InRelease" ] || { echo "STAGED_REPO $STAGED_REPO has no dists/${STAGED_SUITE:-breadstick}/InRelease" >&2; exit 2; }
   R="$R -v $(cd "$STAGED_REPO" && pwd):/repo:ro -e STAGED_SUITE=${STAGED_SUITE:-breadstick}"
 fi
-docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $AGENT_ENV -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e HEAVY="${HEAVY:-}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
+# VIRGL_DIR=<folder holding a vtest server's .virgl_test socket> (round 12, V19's spike in vmparc.py): mounted at /v.
+V=
+[ -n "${VIRGL_DIR:-}" ] && V="-v $(cd "$VIRGL_DIR" && pwd):/v -e VIRGL_SOCK=/v/.virgl_test"
+docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $V $AGENT_ENV -e VMPARC="${VMPARC:-1}" -e VMPARC_BREAK="${VMPARC_BREAK:-}" -e ONLY_VMPARC="${ONLY_VMPARC:-}" -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e HEAVY="${HEAVY:-}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:3 python3 /t/qemu-test.py

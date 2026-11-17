@@ -1,0 +1,1 @@
+set -e; d=/run/bsl/headless; g=$(id -gn 'tester'); [ -L "$d" ] && rm -f "$d"; mkdir -p "$d"; chown root:"$g" "$d"; chmod 750 "$d"; rm -f "$d/passwd.tmp"; ( umask 077; cat > "$d/passwd.tmp" ); chown root:"$g" "$d/passwd.tmp"; chmod 640 "$d/passwd.tmp"; mv -f "$d/passwd.tmp" /run/bsl/headless/passwd

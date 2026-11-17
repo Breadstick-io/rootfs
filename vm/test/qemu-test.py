@@ -1177,7 +1177,9 @@ def v11_bench():
 
 # The display: a host X server (Xvfb here, the app's lorie on a device) behind a host-side pool of
 # channels to the guest relay on vsock 6000, the way the app's VmX11Relay does it.
-if os.path.exists("/usr/bin/Xvfb"):
+# ONLY_VMPARC=1 (round 12): boot, the user, the network, then the vmparC loop's checks alone (vmparc.py), and off.
+ONLY_VMPARC = os.environ.get("ONLY_VMPARC") == "1"
+if os.path.exists("/usr/bin/Xvfb") and not ONLY_VMPARC:
     import socket as so
     xvfb = subprocess.Popen(["Xvfb", ":5", "-screen", "0", "1280x800x24", "-nolisten", "tcp"], stderr=subprocess.DEVNULL)
     time.sleep(1.5)
@@ -1243,7 +1245,8 @@ if os.path.exists("/usr/bin/Xvfb"):
     desktop_test()
     xvfb.kill()
 
-files_test()
+if not ONLY_VMPARC:
+    files_test()
 
 
 # ----------------------------------------------------------------------------- ways in (plan 5.14 V13, V18)
@@ -1758,6 +1761,12 @@ def packages_test():
         share_close(h)
 
 
+if ONLY_VMPARC:
+    import vmparc  # noqa: E402
+    vmparc.run_all(globals())
+    power_off(q, " (vmparc only)")
+    print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
+    sys.exit(1 if fails else 0)
 if os.environ.get("PARITY", "1") == "1":
     engine_test()
     settings_relay_test()
@@ -1770,6 +1779,9 @@ if os.environ.get("PARITY", "1") == "1":
     v14_print_test()
     v14_camera_test()
     v14_pad_test()
+    # 4.0 round 12, the vmparC loop: Emulated Display, the MCP tools and the Get apps bundles in the VM, V19's spike.
+    import vmparc  # noqa: E402
+    vmparc.run_all(globals())
     # Made as root in this container: qemu-test.sh, which is not, could not remove them from /w.
     for _p in ("/w/v12", "/w/drop"):
         __import__("shutil").rmtree(_p, ignore_errors=True)

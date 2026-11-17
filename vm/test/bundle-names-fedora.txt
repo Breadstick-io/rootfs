@@ -1,0 +1,4 @@
+office libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-gtk3
+graphics gimp inkscape
+media mpv audacity
+fonts fonts-noto-cjk fonts-noto-color-emoji fonts-noto-core

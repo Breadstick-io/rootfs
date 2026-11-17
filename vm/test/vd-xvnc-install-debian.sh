@@ -1,0 +1,1 @@
+export DEBIAN_FRONTEND=noninteractive; apt-get install -y --no-install-recommends tigervnc-standalone-server 2>&1 | tail -3 || true; command -v Xtigervnc >/dev/null 2>&1 || { apt-get update 2>&1 | tail -1; apt-get install -y --no-install-recommends tigervnc-standalone-server 2>&1 | tail -3; }
