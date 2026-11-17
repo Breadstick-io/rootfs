@@ -241,7 +241,10 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
           rpm --dbpath "$w/rpmdb" -q --whatprovides "$cn" --qf '%{NAME}-%{VERSION}-%{RELEASE}%|ARCH?{.%{ARCH}}:{}|\n' > "$w/rpm-prov" 2>/dev/null || continue
           # The restored system having it itself: it says nothing either.
           ! rpm -q --whatprovides "$cn" >/dev/null 2>&1 || continue
-          if [ "$cn" = "$c" ] && grep -qxF -f "$w/rpm-prov" "$w/rpm-miss"; then r=miss; break; fi
+          # Left out only when no package that has it stays (second review): every one left out or taken away,
+          # at least one of them left out. One put back meets it.
+          if [ "$cn" = "$c" ] && ! cat "$w/rpm-miss" "$w/rpm-gone" | grep -vxF -f - "$w/rpm-prov" | grep -q . \
+            && grep -vxF -f "$w/rpm-gone" "$w/rpm-prov" | grep -q .; then r=miss; break; fi
           grep -vxF -f "$w/rpm-gone" "$w/rpm-prov" | grep -q . || r=gone
         done < "$w/rpm-req"
         case $r in
