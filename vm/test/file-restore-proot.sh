@@ -198,6 +198,7 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
     : > "$w/rpm-add"
     : > "$w/rpm-miss"
     : > "$w/rpm-gone"
+    : > "$w/rpm-nofile"
     # Each installed package of a name the restored database lacks, by its own NVRA (round 11, H3): a VM that updated
     # keeps two kernels (installonly_limit), and the one installed after the image lost files the restore took away;
     # the other is whole and stays. None of its files kept: taken away with the rest that came after the image.
@@ -214,10 +215,46 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
         case "$ff" in *g*|*m*) continue ;; esac
         if [ -e "$fp" ] || [ -L "$fp" ]; then case "$fm" in d*) ;; *) h=$((h + 1)) ;; esac; else m=$((m + 1)); fi
       done < "$w/rpm-files"
-      if [ "$m" = 0 ]; then printf '%s\n' "$pv" >> "$w/rpm-add"
+      if [ "$m" = 0 ] && [ "$h" = 0 ]; then printf '%s\n' "$pv" >> "$w/rpm-nofile"
+      elif [ "$m" = 0 ]; then printf '%s\n' "$pv" >> "$w/rpm-add"
       elif [ "$h" = 0 ]; then printf '%s\n' "$pv" >> "$w/rpm-gone"
       else printf '%s\n' "$pv" >> "$w/rpm-miss"; fi
     done
+    # A package with no file of its own (Fedora's kernel meta-package, a group's) is judged by what it needs (round
+    # 11 review): one need met only by a package left out, left out with it (kernel-7.3.4 beside kernel-core-7.3.4,
+    # whose kernel-core-uname-r the kept kernel-core provides at another version); one met only by packages taken
+    # away, taken away; else put back. Again until a pass decides none (one such package needing another), three
+    # times at most. A need nothing in the VM's database meets (rpmlib's, the system's own) says nothing.
+    j=0
+    while [ -s "$w/rpm-nofile" ] && [ "$j" -lt 3 ]; do
+      j=$((j + 1))
+      : > "$w/rpm-nofile.1"
+      while IFS= read -r pv; do
+        r=add
+        { rpm --dbpath "$w/rpmdb" -q --requires "$pv" 2>/dev/null || true; } | grep -v '^rpmlib(' | sort -u > "$w/rpm-req" || true
+        while IFS= read -r c; do
+          # By the capability's name (rpm -q --whatprovides takes no version): every package that has it taken
+          # away, taken away; one left out having it, left out, for a need without a version. A versioned one
+          # (`kernel-core-uname-r = 7.3.4-300.fc45`) the check below judges, where such a package gets no
+          # "version apart" either.
+          cn=${c%% [<>=]*}
+          rpm --dbpath "$w/rpmdb" -q --whatprovides "$cn" --qf '%{NAME}-%{VERSION}-%{RELEASE}%|ARCH?{.%{ARCH}}:{}|\n' > "$w/rpm-prov" 2>/dev/null || continue
+          # The restored system having it itself: it says nothing either.
+          ! rpm -q --whatprovides "$cn" >/dev/null 2>&1 || continue
+          if [ "$cn" = "$c" ] && grep -qxF -f "$w/rpm-prov" "$w/rpm-miss"; then r=miss; break; fi
+          grep -vxF -f "$w/rpm-gone" "$w/rpm-prov" | grep -q . || r=gone
+        done < "$w/rpm-req"
+        case $r in
+          miss) printf '%s\n' "$pv" >> "$w/rpm-miss" ;;
+          gone) printf '%s\n' "$pv" >> "$w/rpm-gone" ;;
+          *) printf '%s\n' "$pv" >> "$w/rpm-nofile.1" ;;
+        esac
+      done < "$w/rpm-nofile"
+      if [ "$(wc -l < "$w/rpm-nofile")" = "$(wc -l < "$w/rpm-nofile.1")" ]; then break; fi
+      mv -f "$w/rpm-nofile.1" "$w/rpm-nofile"
+    done
+    cat "$w/rpm-nofile" >> "$w/rpm-add"
+    mv -f "$w/rpm-nofile" "$w/rpm-bare"
     o=0
     if [ -s "$w/rpm-miss" ]; then
       tee -a "$w/left-rpm" < "$w/rpm-miss" | sed 's/^/left out (rpm): /' >>/var/log/breadstick-vm-restore.log
@@ -245,13 +282,14 @@ if [ -d "$w/rpmdb" ] && command -v rpm >/dev/null 2>&1; then
           FILENAME == ARGV[2] { if ($2 in add) key[$2] = $2; next }
           FILENAME == ARGV[3] { cap[$0] = 1; next }
           FILENAME == ARGV[4] { if ($0 ~ /^Unsatisfied dependencies for .*:$/) h = $0; else old[h "\n" $0] = 1; next }
+          FILENAME == ARGV[5] { bare[$0] = 1; next }
           /^Unsatisfied dependencies for .*:$/ { h = $0; x = substr($0, 30, length($0) - 30); sub(/-[0-9]+:/, "-", x); k = (x in key) ? key[x] : ""; next }
           ((h "\n" $0) in old) { next }
           {
             c = substr($0, 2); v = c
-            if (k != "" && sub(/ [<>=]+ [^ ]+ is needed by .*$/, "", c) && (c in cap)) { print "apart\t" k "\t" substr(v, 1, index(v, " is needed by ") - 1); next }
+            if (k != "" && !(k in bare) && sub(/ [<>=]+ [^ ]+ is needed by .*$/, "", c) && (c in cap)) { print "apart\t" k "\t" substr(v, 1, index(v, " is needed by ") - 1); next }
             print (k != "" ? "bad\t" k : "other")
-          }' "$w/rpm-add" "$w/rpm-vm" "$w/rpm-caps" "$w/rpm-v0" "$w/rpm-v" > "$w/rpm-why"
+          }' "$w/rpm-add" "$w/rpm-vm" "$w/rpm-caps" "$w/rpm-v0" "$w/rpm-bare" "$w/rpm-v" > "$w/rpm-why"
         awk -F '\t' '$1 == "bad" { print $2 }' "$w/rpm-why" | sort -u > "$w/rpm-bad"
         i=$((i + 1))
         if [ ! -s "$w/rpm-bad" ]; then

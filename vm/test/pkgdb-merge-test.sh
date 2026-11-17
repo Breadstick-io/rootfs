@@ -11,7 +11,9 @@
 # Round 11 (H3): two kernels in each family, the second installed after the image and missing a file the restore took
 # away. Each installed package is judged on its own (rpm by NVRA, pacman by name, version and processor, dpkg by its
 # file list): the whole kernel stays, the other is left out, and every package left out is named in the log and the
-# record, a package with no file list (dpkg) or whose entry the restore took away (pacman) included. A package none of
+# record, a package with no file list (dpkg) or whose entry the restore took away (pacman) included. rpm judges a
+# package with no file of its own by its needs (round 11 review): a kernel meta-package goes with its kernel, one
+# needing only a package taken away is taken away, one needing nothing is put back. A package none of
 # whose files the restore kept (it came after the image and the backup lacks it) was taken away with the restore: named
 # so, never recorded. dpkg reads a list the restore took away from the copy kept before it and puts its info back.
 #
@@ -146,24 +148,39 @@ mkk() { # a kernel: version, its own file
   rpmbuild -bb --quiet --define "_topdir /tmp/b" --define "_rpmdir /tmp/b/out" /tmp/b/bsltest-kernel-$1.spec >/dev/null 2>&1
 }
 mkk 1; mkk 2
+mkm() { # a package with no file of its own (Fedora's kernel meta-package): name version requires...
+  n=$1 v=$2; shift 2
+  { printf 'Name: %s\nVersion: %s\nRelease: 1\nSummary: t\nLicense: none\nBuildArch: noarch\n' "$n" "$v"
+    for r in "$@"; do printf 'Requires: %s\n' "$r"; done
+    printf '%%description\nt\n%%files\n'
+  } > /tmp/b/$n-$v.spec
+  rpmbuild -bb --quiet --define "_topdir /tmp/b" --define "_rpmdir /tmp/b/out" /tmp/b/$n-$v.spec >/dev/null 2>&1
+}
+# Round 11 review: the kernel meta-package of each kernel (no files), one needing only a package taken away, one
+# needing nothing.
+mkm bsltest-kmeta 1 'bsltest-kernel = 1-1'; mkm bsltest-kmeta 2 'bsltest-kernel = 2-1'; mkm bsltest-gonemeta 1 bsltest-gone
+mkm bsltest-emptymeta 1
 o=/tmp/b/out/noarch
 # The restored (backup's) database: the container's own, base 1 and a package it had broken already. The VM's
 # packages' files are on the disk (they are the image's), not in the restored database.
 rpm -i --nodeps --nosignature $o/bsltest-base-1-1.noarch.rpm $o/bsltest-oldbroken-1-1.noarch.rpm $o/bsltest-free-1-1.noarch.rpm \
   $o/bsltest-needy-1-1.noarch.rpm $o/bsltest-chain-1-1.noarch.rpm $o/bsltest-pinned-1-1.noarch.rpm $o/bsltest-missing-1-1.noarch.rpm \
-  $o/bsltest-chain2-1-1.noarch.rpm $o/bsltest-gone-1-1.noarch.rpm $o/bsltest-kernel-1-1.noarch.rpm $o/bsltest-kernel-2-1.noarch.rpm
+  $o/bsltest-chain2-1-1.noarch.rpm $o/bsltest-gone-1-1.noarch.rpm $o/bsltest-kernel-1-1.noarch.rpm $o/bsltest-kernel-2-1.noarch.rpm \
+  $o/bsltest-kmeta-1-1.noarch.rpm $o/bsltest-kmeta-2-1.noarch.rpm $o/bsltest-gonemeta-1-1.noarch.rpm $o/bsltest-emptymeta-1-1.noarch.rpm
 # The second kernel lost a file the restore took away (its licence; its kernel is kept); bsltest-gone came after the
 # image and lost every file (taken away with the restore, not recorded).
 rm -f /usr/lib/bsltest-kernel-2/LICENSE /usr/share/bsltest/bsltest-gone
 d=$(rpm -E %_dbpath)
 cp -a "$d" /tmp/vmdb
-rpm -e --justdb --nodeps --allmatches bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-gone bsltest-kernel
+rpm -e --justdb --nodeps --allmatches bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-gone bsltest-kernel \
+  bsltest-kmeta bsltest-gonemeta bsltest-emptymeta
 # The VM's database: the container's own, base 2 and the three.
 rpm --dbpath /tmp/vmdb -e --justdb --nodeps bsltest-oldbroken bsltest-base
 rpm --dbpath /tmp/vmdb -i --justdb --nodeps --nosignature $o/bsltest-base-2-1.noarch.rpm
 cp -a /tmp/vmdb $w/rpmdb
 . /m/merge.sh
-for p in bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-base bsltest-oldbroken bsltest-gone bsltest-kernel; do
+for p in bsltest-free bsltest-needy bsltest-chain bsltest-pinned bsltest-missing bsltest-chain2 bsltest-base bsltest-oldbroken bsltest-gone bsltest-kernel \
+  bsltest-kmeta bsltest-gonemeta bsltest-emptymeta; do
   if v=$(rpm -q $p 2>/dev/null); then v=$(printf '%s' "$v" | tr '\n' ' '); else v=absent; fi; printf '%s=%s\n' $p "$v"
 done
 rpm -Va --nofiles --nodigest --nosignature --noscripts 2>&1 | sed 's/^/broken: /' || true
@@ -172,7 +189,7 @@ sed 's/^/record: /' /var/lib/breadstick-vm/restore-left-out
 BSL_PKGDB_FED
 
 cat > "$work/fedora.want" <<'BSL_PKGDB_FEDW'
-package database (rpm): the VM's own packages put back: 5, left out: 3, taken away with the restore: 1
+package database (rpm): the VM's own packages put back: 7, left out: 4, taken away with the restore: 2
 package database (rpm): a version apart from the system's (the next full upgrade levels them): 2
 bsltest-free=bsltest-free-1-1.noarch
 bsltest-needy=bsltest-needy-1-1.noarch
@@ -184,6 +201,9 @@ bsltest-base=bsltest-base-1-1.noarch
 bsltest-oldbroken=bsltest-oldbroken-1-1.noarch
 bsltest-gone=absent
 bsltest-kernel=bsltest-kernel-1-1.noarch
+bsltest-kmeta=bsltest-kmeta-1-1.noarch
+bsltest-gonemeta=absent
+bsltest-emptymeta=bsltest-emptymeta-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-oldbroken-1-1.noarch:
 broken: 	bsltest-nowhere is needed by (installed) bsltest-oldbroken-1-1.noarch
 broken: Unsatisfied dependencies for bsltest-needy-1-1.noarch:
@@ -194,10 +214,13 @@ a version apart (rpm): bsltest-needy-1-1.noarch needs bsltest-base >= 2
 a version apart (rpm): bsltest-pinned-1-1.noarch needs bsltest-base = 2-1
 left out (rpm): bsltest-chain2-1-1.noarch
 left out (rpm): bsltest-kernel-2-1.noarch
+left out (rpm): bsltest-kmeta-2-1.noarch
 left out (rpm): bsltest-missing-1-1.noarch
 taken away (rpm): bsltest-gone-1-1.noarch
+taken away (rpm): bsltest-gonemeta-1-1.noarch
 record: rpm bsltest-chain2-1-1.noarch bsltest-chain2.noarch
 record: rpm bsltest-kernel-2-1.noarch
+record: rpm bsltest-kmeta-2-1.noarch
 record: rpm bsltest-missing-1-1.noarch bsltest-missing.noarch
 BSL_PKGDB_FEDW
 

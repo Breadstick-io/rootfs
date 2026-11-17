@@ -1854,6 +1854,72 @@ def tabs_test():
     run(f"tmux -S {sock} kill-server; rm -f /tmp/r9-pane", user="tester")
 
 
+def strict_move_test():
+    """Round 11 (R10-2 and its review): a move out of the VM's archive (Android VmFileBackup.TAR_SCRIPT_STRICT, copied
+    in file-backup-strict.sh) while the mount points change under it, as on a device: writers in /tmp (a tmpfs, the
+    X11 relay's socket), /run, /dev/shm and a tmpfs mounted under /mnt as a shared folder is. tar must say "file
+    changed as we read it" for at least one of them (up to three runs; the line is a race), every run must end 0,
+    and the archive must hold every entry `find -xdev` listed just before it (minus what the script leaves out:
+    /tmp's contents, lost+found, a restore's folders, and sockets, which tar never stores) that still exists after."""
+    want = r"^tar: \./(tmp|run|dev/shm|mnt/bsl-r11-share|sys|proc|dev): file changed as we read it$"
+    churn = ("mkdir -p /mnt/bsl-r11-share && mount -t tmpfs bsl-r11 /mnt/bsl-r11-share && rm -f /run/bsl-r11-stop && "
+             "find / -xdev \\( -path '/tmp/*' -o -path /lost+found -o -path /var/lib/breadstick-vm/restore "
+             "-o -path /var/lib/breadstick-vm/restore.work \\) -prune -o ! -type s -print > /var/tmp/bsl-r11-find.lst; "
+             "( n=0; while [ ! -e /run/bsl-r11-stop ]; do n=$((n + 1)); for d in /tmp /run /dev/shm /mnt/bsl-r11-share; do "
+             ": > $d/.bsl-r11-w$n; done; [ $((n % 20)) != 0 ] || sleep 0.01; done ) </dev/null >/dev/null 2>&1 & c=$!\n")
+    # The archive goes through a slow reader, as on a device (zstd, then storage): tar then waits on its output while
+    # it writes a folder's header, which is when a writer's change lands between tar's two looks at the folder.
+    slow = ("python3 -c 'import sys, time\nr, w = sys.stdin.buffer, sys.stdout.buffer\nwhile True:\n"
+            "    b = r.read1(65536)\n    if not b: break\n    w.write(b); w.flush(); time.sleep(0.0005)'")
+    done_ = ("; echo $? > /run/bsl-r11-st ) | " + slow + "\nst=$(cat /run/bsl-r11-st); touch /run/bsl-r11-stop; wait $c; "
+             "rm -f /run/bsl-r11-stop /run/bsl-r11-st; find /tmp /run /dev/shm -maxdepth 1 -name '.bsl-r11-w*' -delete; umount /mnt/bsl-r11-share; rmdir /mnt/bsl-r11-share; exit $st\n")
+    strict = open("/t/file-backup-strict.sh").read()
+    runs, seen, ok_all = [], 0, True
+    for i in range(3):
+        t0 = time.time()
+        st, n = stream_out(churn + "( ( " + strict + "\n)" + done_, "/w/vm-strict.tar")
+        tl, _ = run("grep -c . /var/log/breadstick-vm-backup.log; grep -c -E '" + want + "' /var/log/breadstick-vm-backup.log; "
+                    "grep -E '" + want + "' /var/log/breadstick-vm-backup.log | head -n 4 | tr '\\n' '|'")
+        w = tl.split("\n")
+        m = int(w[1]) if len(w) > 1 and w[1].strip().isdigit() else 0
+        runs.append(f"run {i + 1}: exit {st}, {n >> 20} MiB in {time.time() - t0:.0f} s, log {w[0].strip()} lines, "
+                    f"mount points {m} {w[2].strip() if len(w) > 2 else ''}")
+        ok_all = ok_all and st == 0 and n > (50 << 20)
+        seen += m
+        if not ok_all or seen or i == 2:
+            break
+        os.remove("/w/vm-strict.tar")
+    check("file backup: a move's archive ends whole while mount points change under it (R10-2)", ok_all and seen > 0,
+          "; ".join(runs))
+    import tarfile
+    names = set()
+    try:
+        with tarfile.open("/w/vm-strict.tar", "r|") as tf:
+            for m in tf:
+                nm = m.name[2:] if m.name.startswith("./") else m.name
+                names.add("" if nm in (".", "./") else nm.rstrip("/"))
+        ok_tar = True
+    except Exception as e:  # noqa: BLE001
+        ok_tar = False
+        print("tar error:", e)
+    if os.path.exists("/w/vm-strict.tar"):
+        os.remove("/w/vm-strict.tar")
+    data, _ = bslvm.run(args, "exec cat /var/tmp/bsl-r11-find.lst", "root")
+    listed = {l[1:] for l in data.decode("utf-8", "surrogateescape").split("\n") if l.startswith("/")}
+    missing = sorted(listed - names)
+    still = []
+    if missing and len(missing) <= 400:
+        o, _ = run("while IFS= read -r p; do [ -e \"/$p\" ] || [ -L \"/$p\" ] && echo \"$p\"; done <<'BSL_R11_LIST'\n"
+                   + "\n".join(missing) + "\nBSL_R11_LIST")
+        still = [l for l in o.splitlines() if l.strip()]
+    elif missing:
+        still = missing
+    run("rm -f /var/tmp/bsl-r11-find.lst")
+    check("file backup: a move's archive holds every file the VM had (R10-2)", ok_tar and len(listed) > 10000 and not still,
+          f"{len(listed)} listed, {len(names)} in the archive, {len(missing)} not in it, {len(still)} of them still there"
+          + (f": {still[:5]}" if still else ""))
+
+
 def file_backup_test():
     """Plan 5.14 V20: a file-level backup of the running VM (Android vm/VmFileBackup.TAR_SCRIPT, copied in
     file-backup.sh), checked as a tar (owners, setuid, links, an extended attribute), then restored into the same VM
@@ -1896,15 +1962,7 @@ def file_backup_test():
           and not any(x.startswith("tmp/") for x in names),
           f"{len(names)} entries; sudo {oct(sudo.mode) if sudo else None}, keep uid {keep.uid if keep else None} "
           f"xattr {keep.pax_headers.get('SCHILY.xattr.user.breadstick') if keep else None}")
-    # Round 11 (R10-2): a move out of the VM's archive (Android VmFileBackup.TAR_SCRIPT_STRICT, copied in
-    # file-backup-strict.sh) is whole on a running VM: tar's "file changed as we read it" for the mount points /sys,
-    # /proc, /dev and /run, which made every move out of the VM fail on the Pixel, is the only kind it accepts beside
-    # /var/log and sockets.
-    t0 = time.time()
-    st, n = stream_out(open("/t/file-backup-strict.sh").read(), "/dev/null")
-    tl, _ = run("grep -c . /var/log/breadstick-vm-backup.log; head -n 5 /var/log/breadstick-vm-backup.log | tr '\\n' '|'")
-    check("file backup: a move's archive (every file or a failure) is whole on the running VM (R10-2)",
-          st == 0 and n > (50 << 20), f"exit {st}, {n >> 20} MiB in {time.time() - t0:.0f} s; tar's log: {tl.strip()}")
+    strict_move_test()
     run("rm -f ~/r9-keep.txt ~/r9-link; echo after > ~/r9-after.txt", user="tester")
     run("echo after > /etc/r9-after.conf; chmod 0700 /var/tmp")
     t0 = time.time()
@@ -2108,7 +2166,9 @@ def proot_restore_test():
     the system's own files are the proot system's, the app's user script makes its account again, and sudo works."""
     if not os.path.exists("/w/proot.tar"):
         return
-    q = boot(" (for the proot restore)")
+    # The pair the app boots (round 11 review): after the kernel test its last-good is the new kernel's, not the image's.
+    app_pair = {"kernel": "/w/next-vmlinuz", "initrd": "/w/next-initrd.img"} if "new" in KERNEL else {}
+    q = boot(" (for the proot restore)", **app_pair)
     # The units that fail in this VM before the restore (none, as a rule): the restore may add none (round 10, M6).
     failed_before, _ = run("systemctl is-system-running --wait >/dev/null; systemctl --failed --no-legend --plain | cut -d' ' -f1 | sort")
     # Made after the image's list and not in the backup: the restore takes it away (round 9 review).
@@ -2128,7 +2188,9 @@ def proot_restore_test():
     if gone.strip():
         print(f"proot restore: {gone.strip()}", flush=True)
     power_off(q, " (proot restored)")
-    q = boot(" (after the proot restore)")
+    q = boot(" (after the proot restore)", **app_pair)
+    o, _ = run("uname -r")
+    print(f"proot restore: running {o.strip()} ({'the new kernel, the app' + chr(39) + 's last good' if app_pair else 'the image' + chr(39) + 's'})", flush=True)
     o, st = run(PREPARE_USER)
     check("proot restore: the account is made again, its bus up", st == 0 and "bus ok" in o, o.strip()[-200:])
     o, st = run("sudo -n true && echo sudo-ok; . /etc/os-release; echo \"$NAME|$ID\"; systemctl is-active bsl-vmagent bsl-vmnet; "
@@ -2194,6 +2256,23 @@ true"""}[DISTRO]
     check("proot restore: what was left out is recorded for the refresh (round 10, third review)", got_rec == want_rec,
           f"record: {rec.strip()!r}; log: {left.strip()!r}")
 
+    def next_start(what):
+        """The app copies out the pair the disk boots while the VM runs and boots it at the next start (VmKernelSlots):
+        when that is another kernel than the running one, the VM is started again on it, as the next start would."""
+        nonlocal q
+        p = boot_pair()
+        o, _ = run("uname -r")
+        if p is None or p[0] == o.strip():
+            print(f"proot restore: the disk boots the running kernel {o.strip()}{what}", flush=True)
+            return
+        for src, dst in ((p[2], "/w/after-vmlinuz"), (p[3], "/w/after-initrd.img")):
+            data, _ = bslvm.run(args, "exec cat '" + src + "'", "root")
+            with open(dst, "wb") as f:
+                f.write(data)
+        print(f"proot restore: the disk boots {p[0]}, not the running {o.strip()}: started again on it{what}", flush=True)
+        power_off(q, " (before the next start)")
+        q = boot(" (the next start after the proot restore)", kernel="/w/after-vmlinuz", initrd="/w/after-initrd.img")
+
     def db_check(what):
         o, st = run(f"{owns} {kfile} >/dev/null 2>&1 && echo kernel-owned; p={pid1}; {owns} \"$p\" >/dev/null 2>&1 || "
                     f"{owns} \"${{p#/usr}}\" >/dev/null 2>&1 && echo systemd-owned; echo dups=$({dups} | wc -l); "
@@ -2220,8 +2299,10 @@ true"""}[DISTRO]
         gone, _ = run("test -e /var/lib/breadstick-vm/restore-left-out || echo gone")
         check("proot restore: the refresh installs what was left out again, and the record goes", st == 0 and "gone" in gone,
               f"exit {st}: {' | '.join(o.strip().splitlines()[-6:])}")
+        next_start(" (after the refresh's reinstall)")
         db_check(" (after the refresh's reinstall)")
     else:
+        next_start("")
         db_check("")
     if DISTRO == "debian":
         # Round 10 review: a backup with breadstick-systemd (the Standard engine's service manager) comes in without it:
