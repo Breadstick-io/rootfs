@@ -20,7 +20,10 @@ if [ -n "$n" ]; then
     # installs an install-only package next to them). Only when the repositories have nothing newer than the
     # newest installed does the kernel of that version leave /boot, when no package owns it, so the VM boots
     # one a package owns from its next start (round 11 review; the second review: by its NVRA).
+    # A version a newer build was installed beside in this run keeps its pair in /boot, and its other packages
+    # (kernel-modules-core after kernel-core) say so, never that it left (round 12, vmfix review; plan 5.14).
     g=
+    b=
     for p in $m; do
       a=${p##*.}; r=${p%.*}; v=${r%-*}; nm=${v%-*}
       case ${r#"$nm"-} in [0-9]*-*) ;; *) g="$g $p"; continue ;; esac
@@ -37,10 +40,12 @@ if [ -n "$n" ]; then
       if [ -n "$l" ] && { [ -z "$t" ] || [ "$(rpm --eval "%{lua:print(rpm.vercmp('$l','$t'))}")" = 1 ]; }; then
         dnf -y install --setopt=install_weak_deps=False "$nm-$l.$a" || exit $?
         if rpm -q "$nm-$l.$a" >/dev/null 2>&1; then
-          echo "the VM's own $p is in no repository; installed beside it: $nm-$l.$a"
+          echo "the VM's own $p is in no repository; installed beside it: $nm-$l.$a"; b="$b $k"
         else
           g="$g $p"
         fi
+      elif case " $b " in *" $k "*) true ;; *) false ;; esac; then
+        echo "the VM's own $p is in no repository; its kernel stays in /boot beside the newer build installed for it"
       elif [ -f "/boot/vmlinuz-$k" ] && ! rpm -qf "/boot/vmlinuz-$k" >/dev/null 2>&1 && ! rpm -qf "/usr/lib/modules/$k/vmlinuz" >/dev/null 2>&1; then
         rm -f "/boot/vmlinuz-$k" "/boot/initramfs-$k.img"
         echo "the VM's own $p is in no repository, nor anything newer: its kernel left /boot, the next start boots one a package owns"
