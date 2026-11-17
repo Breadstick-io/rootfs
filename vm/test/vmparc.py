@@ -108,14 +108,21 @@ def emulated_display_test(g):
 def stop_display(g, s):
     """VirtualDisplay.stop in the VM: the channel hung up, then vd-stop.sh (the display's programs, its Xvnc, the password)."""
     run, check, app_text = g["run"], g["check"], g["app_text"]
+    # Programs naming the display the other ways X clients do (the round 12 review's survivor was DISPLAY=:10.0), and
+    # one on another display whose number starts with this one's, which Stop must leave alone.
+    run(f"for d in :{DISPLAY_N}.0 unix:{DISPLAY_N} localhost:{DISPLAY_N}.0; do setsid env DISPLAY=$d sleep 600 >/dev/null 2>&1 & done; "
+        f"setsid env DISPLAY=:{DISPLAY_N}9 BSL_VMPARC_OTHER=1 sleep 601 >/dev/null 2>&1 & true", user="tester")
     g["hangup"](s)
     o, st = run(app_text("vd-stop.sh"))
     time.sleep(3)
     o, _ = run(f"pgrep -x Xvnc || pgrep -x Xtigervnc || echo no-xvnc; test -e /run/bsl/headless/passwd && echo pw-left; "
-               f"for e in /proc/[0-9]*/environ; do tr '\\0' '\\n' 2>/dev/null < $e | grep -qx DISPLAY=:{DISPLAY_N} && echo left:$e; done; "
+               f"for e in /proc/[0-9]*/environ; do tr '\\0' '\\n' 2>/dev/null < $e | grep -Eqx 'DISPLAY=(unix|localhost)?:{DISPLAY_N}(\\.[0-9]+)?|BREADSTICK_HEADLESS=1' && {{ q=${{e%/environ}}; echo left:${{q#/proc/}}:$(cat $q/comm 2>/dev/null):$(stat -c %U $q 2>/dev/null):$(tr '\\0' ' ' < $q/cmdline 2>/dev/null | cut -c1-80 | tr ' ' _):$(tr '\\0' '\\n' < $e | grep ^DISPLAY=):ppid=$(awk '/^PPid/{{print $2}}' $q/status):$(pp=$(awk '/^PPid/{{print $2}}' $q/status); tr '\\0' ' ' < /proc/$pp/cmdline 2>/dev/null | cut -c1-120 | tr ' ' _); }}; done; "
                f"test -e /tmp/.X{DISPLAY_N}-lock && echo lock-left")
-    check("parity: Emulated Display: Stop ends Xvnc and the display's programs, the password file goes (V18)",
-          st == 0 and o.split() == ["no-xvnc"], o.strip().replace("\n", " | ")[-300:])
+    check("parity: Emulated Display: Stop ends Xvnc, the session script and the display's programs (:N, :N.0, unix:N), the password file goes (V18)",
+          st == 0 and o.split() == ["no-xvnc"], " | ".join(l[:240] for l in o.strip().splitlines()))
+    o, _ = run("pgrep -x -f 'sleep 601' || echo gone; pkill -x -f 'sleep 601' || true")
+    check("parity: Emulated Display: Stop leaves another display's programs running (V18)",
+          o.split()[0].isdigit(), o.strip().replace("\n", " | "))
 
 
 # --------------------------------------------------------------------------------------------- MCP row
