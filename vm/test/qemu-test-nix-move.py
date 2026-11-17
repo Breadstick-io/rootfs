@@ -11,7 +11,7 @@ linux/NixEngineMove.kt and vm/VmFileBackup.kt's NIX_SAVE, NIX_STORE_WRITABLE and
      generation with the instance's hello, account and files, the VM guest, sudo, the page, and a rollback to the
      Standard engine's generation refused.
   3. The VM to Standard, its VM half: NixEngineMove.PREPARE_PROOT (nix-prepare-proot.sh) builds the proot generation,
-     then the VM's backup (file-backup.sh) to /w/vm-backup.tar, which the proot half (test-nix-move-proot.sh unpack,
+     then the move's archive of the VM (file-backup-strict.sh) to /w/vm-backup.tar, which the proot half (test-nix-move-proot.sh unpack,
      NixEngineMoveTest, start) moves on.
 """
 import json
@@ -140,7 +140,7 @@ o, st = run(app_text("prepare-user.sh"))
 check("prepare user", st == 0 and "bus ok" in o, o.strip().replace("\n", " | ")[-300:])
 o, st = run("id tester; getent group tester")
 check("R11-4: the account is uid 1000 with its own group 1000, as under proot",
-      "uid=1000(tester) gid=1000(tester)" in o and o.strip().splitlines()[-1].startswith("tester:x:1000:"), o.strip().replace("\n", " | "))
+      "uid=1000(tester) gid=1000(tester)" in o and o.strip().splitlines()[-1].split(":")[0::2][:2] == ["tester", "1000"], o.strip().replace("\n", " | "))
 o, st = run("findmnt -no OPTIONS /nix/store")
 print(f"/nix/store is mounted {o.strip()}", flush=True)
 
@@ -198,8 +198,10 @@ check("move out: the proot generation built in the VM", st == 0 and len(ready) =
 o, _ = run("readlink /nix/var/nix/gcroots/breadstick-engine-proot; test -e /run/current-system/kernel && echo still-vm")
 check("move out: the VM runs on as it was, the proot generation rooted", "still-vm" in o and "/nix/store/" in o, o.strip().replace("\n", " | "))
 t0 = time.time()
-st, n = stream_out(app_text("file-backup.sh"), "/w/vm-backup.tar")
-check("move out: the VM's backup", st == 0 and n > 100 << 20, f"{n >> 20} MiB, {time.time() - t0:.0f} s, exit {st}")
+st, n = stream_out(app_text("file-backup-strict.sh"), "/w/vm-backup.tar")
+check("move out: the VM's backup (the move's strict archive)", st == 0 and n > 100 << 20, f"{n >> 20} MiB, {time.time() - t0:.0f} s, exit {st}")
+if st != 0:
+    print(run("tail -n 8 /var/log/breadstick-vm-backup.log")[0], flush=True)
 power_off(q, " (moved out)")
 
 print(f"{'all passed' if not fails else str(len(fails)) + ' failed: ' + ', '.join(fails)}", flush=True)

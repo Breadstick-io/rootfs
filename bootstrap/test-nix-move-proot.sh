@@ -73,7 +73,7 @@ make)
   ( cd $R && tar --numeric-owner -cf /w/instance.tar . ); check "the instance's tree as a tar" $? "$(du -h /w/instance.tar | cut -f1)"
   ;;
 unpack)
-  tar -xpf /w/vm-backup.tar -C $R --no-same-owner 2>$G/tar.err; check "unpack the VM's backup" $? "$(wc -l < $G/tar.err) error lines"
+  tar -xpf /in/vm-backup.tar -C $R --no-same-owner 2>$G/tar.err; check "unpack the VM's backup" $? "$(wc -l < $G/tar.err) error lines"
   grep -v -e 'Cannot mknod' -e 'Cannot change ownership' $G/tar.err | head -5
   cp /etc/resolv.conf $R/etc/resolv.conf
   ;;
@@ -99,10 +99,11 @@ esac
 echo "fails: $fails"
 exit $fails
 BSL_NIXMOVE_RUN_END
-[ "$MODE" = unpack ] && cp "$IN" "$W/vm-backup.tar"
+# The VM's backup is read where it is (never copied or removed here).
+EXTRA=()
+[ "$MODE" = unpack ] && EXTRA=(-v "$IN:/in/vm-backup.tar:ro")
 rc=0
-docker run --name "$C" --platform linux/arm64 --security-opt seccomp=unconfined -v "$W:/w" "$TAG" sh -c "
+docker run --name "$C" --platform linux/arm64 --security-opt seccomp=unconfined -v "$W:/w" "${EXTRA[@]}" "$TAG" sh -c "
   mkdir -p /w/g && chown $U:$G /w/g && exec setpriv --reuid $U --regid $G --clear-groups env HOME=/w/g sh /w/run.sh $MODE" || rc=$?
-[ "$MODE" = make ] && mv -f "$W/instance.tar" "$OUT"
-[ "$MODE" = unpack ] && rm -f "$W/vm-backup.tar"
+if [ "$MODE" = make ] && [ "$(realpath -m "$OUT")" != "$(realpath "$W/instance.tar")" ]; then mv -f "$W/instance.tar" "$OUT"; fi
 exit $rc

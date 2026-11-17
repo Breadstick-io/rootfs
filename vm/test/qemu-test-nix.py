@@ -90,6 +90,10 @@ check("nixpkgs is in the image and evaluates", st == 0 and '"' in o, o.strip().r
 PREPARE_USER = open("/t/prepare-user.sh").read()
 o, st = run(PREPARE_USER)
 check("prepare user", st == 0 and "bus ok" in o, o.strip().replace("\n", " | ")[-300:])
+o, st = run("id tester; getent group tester")
+check("R11-4: the account is uid 1000 with its own group 1000, as under proot (round 12)",
+      "uid=1000(tester) gid=1000(tester)" in o and any(l.split(":")[0::2][:2] == ["tester", "1000"] for l in o.splitlines()),
+      o.strip().replace("\n", " | "))
 o, st = run("id -un; echo $XDG_RUNTIME_DIR; sudo -n true && echo sudo-ok; command -v xfce4-session", user="tester")
 check("user session, sudo, the desktop's programs", st == 0 and "tester" in o and "sudo-ok" in o and "xfce4-session" in o,
       o.strip().replace("\n", " | "))

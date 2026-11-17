@@ -7,8 +7,10 @@
 #     rootfs/bootstrap/bootstrap-nix.sh [desktop|base|both|vm]
 #
 # vm (plan 5.14 V4): the same configuration with "engine": "vm" as a virtual machine image, through nixpkgs'
-# make-disk-image (vm/nixos/vm-image.nix; the build boots a helper VM, so /dev/kvm is passed in: arm64 on this host,
-# amd64 would run its helper under TCG for hours): OUT_DIR/vm/nixos-26.05-<arch>-vm-<stamp>/{vmlinuz, initrd.img,
+# make-disk-image (vm/nixos/vm-image.nix; the build boots a helper VM, so /dev/kvm is passed in: this host's
+# architecture) or, with VM_ROUTE=tree (the default for amd64 on this arm64 host, round 12), with no helper VM: the
+# system copied into a root tree with its own database as the proot image is, made into the ext4 disk by mkfs.ext4 -d:
+# OUT_DIR/vm/nixos-26.05-<arch>-vm-<stamp>/{vmlinuz, initrd.img,
 # root.img.zst, image.json} as bake-vm.sh writes Debian's, "distro": "nix", the kernel line's
 # init=/nix/var/nix/profiles/system/init (NixOS 26.05's systemd stage 1 resolves it to the newest generation's closure;
 # /sbin/init, a script, is no closure to it) and no root= (stage 1 mounts / from the configuration's fileSystems, and a
@@ -35,7 +37,8 @@
 #      `bsl-nix boot`; in a privileged container with no network that sees only the root tree (activation needs /proc
 #      and /dev, which only a privileged container may mount). /etc/machine-id is left EMPTY (every device makes its
 #      own at its first boot), /run emptied.
-#   5. The image: the root tree as tar (numeric owner 0), zstd level 19, nixos-<release>-<arch>[-desktop]-<stamp>.tar.zst
+#   5. The image: the root tree as tar (numeric owner 0), zstd --ultra -22 --long=27 (round 12; BAKE_ZSTD_LEVEL and
+#      BAKE_ZSTD_LONG), nixos-<release>-<arch>[-desktop]-<stamp>.tar.zst
 #      in dist/ (git-ignored), written .unchecked and renamed only when its checks pass (nix-image-checks.sh: under
 #      Cloudflare's 512,000,000-byte cache limit, no hard link, the store verified against its database, and on a
 #      desktop image the desktop marker and /usr/share's links, which the first activation makes).
@@ -45,8 +48,8 @@
 # configuration's locales start empty), so the trim is documentation: trimmed builds the image's generation with
 # documentation off (breadstick.imageTrim, which the user's first `bsl-nix apply` turns off, bringing documentation
 # back), and the user's language is filled in at the first desktop start by `bsl-nix languages` (the app runs it; on
-# Wi-Fi or Ethernet, as Fedora's fill). auto builds it with documentation first and, when that image is at or over the
-# limit, builds the trimmed one and keeps only it.
+# Wi-Fi or Ethernet, as Fedora's fill). auto builds it with documentation first and, when that image is within
+# HEADROOM (25,600,000 bytes, 5% of the limit; round 12) of the limit or over it, builds the trimmed one and keeps only it.
 #
 # MANIFEST_DIR (optional): manifest-nix-<arch>[-desktop].json for each image (RootfsDownloader.manifestName for
 # Distro.NIX), for a LOCAL check. Refused under AutoBuild/dist or a mirror.
@@ -91,6 +94,8 @@ case "$RUN" in *[!a-z0-9-]*|''|-*) echo "ERROR: RUN is lowercase letters, digits
 case "${KEEP_STORE:-}" in ''|1) ;; *) echo "ERROR: KEEP_STORE is 1 or unset" >&2; exit 1 ;; esac
 VOL="bsl-$RUN-store-$HOST"
 DOCS_LANGS="${DOCS_LANGS:-auto}"
+HEADROOM="${HEADROOM:-25600000}"
+case "$HEADROOM" in *[!0-9]*|'') echo "ERROR: HEADROOM is a number of bytes" >&2; exit 1 ;; esac
 case "$DOCS_LANGS" in all|trimmed|auto) ;; *) echo "ERROR: DOCS_LANGS is all, trimmed or auto" >&2; exit 1 ;; esac
 case "${OVER_CACHE_LIMIT:-}" in ''|keep) ;; *) echo "ERROR: OVER_CACHE_LIMIT is keep or unset" >&2; exit 1 ;; esac
 NIX_IMAGE="${NIX_IMAGE:-nixos/nix:latest}"
@@ -496,7 +501,9 @@ for f in base desktop; do
     build_one "$f" 1 "$T"
   else
     build_one "$f" "" "$T"
-    if [ "$f" = desktop ] && [ "$DOCS_LANGS" = auto ] && ! why="$(bsl_nix_size_check "$T.unchecked")"; then
+    # auto keeps documentation only with HEADROOM to spare under the cache limit (round 12: an image that just fits
+    # stops fitting at its next update; 25,600,000 bytes is 5% of the limit).
+    if [ "$f" = desktop ] && [ "$DOCS_LANGS" = auto ] && ! why="$(BSL_CACHE_LIMIT=$((BSL_CACHE_LIMIT - HEADROOM)) bsl_nix_size_check "$T.unchecked")"; then
       log "$why"
       log "DOCS_LANGS=auto: the desktop image again, without documentation and languages (plan 5.4)"
       rm -f "$T.unchecked"

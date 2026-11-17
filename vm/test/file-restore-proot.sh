@@ -27,6 +27,7 @@ fi
 awk '$5 != "/" { print "." $5 }' /proc/self/mountinfo | sort -u > "$w/mounts"
 if [ -e /etc/NIXOS ] && [ -d "$s/nix/store" ]; then
   grep -vxF ./nix/store "$w/mounts" > "$w/mounts.1" || true
+  echo ./var/empty >> "$w/mounts.1"
   mv -f "$w/mounts.1" "$w/mounts"
   if awk '$5 == "/nix/store" { f = 1 } END { exit !f }' /proc/self/mountinfo; then
     mount -o remount,bind,rw /nix/store 2>/dev/null || mount -o remount,rw /nix/store
