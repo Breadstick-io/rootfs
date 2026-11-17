@@ -1767,6 +1767,165 @@ if ONLY_VMPARC:
     power_off(q, " (vmparc only)")
     print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
     sys.exit(1 if fails else 0)
+
+
+BOOT_PAIR = open("/t/boot-pair.sh").read()
+
+
+def boot_pair():
+    """Android VmCommands.BOOT_PAIR_SCRIPT (copied in boot-pair.sh): (release, [sums], kernel, initrd) or None. A 7th
+    word, NixOS's init, is not expected on the Debian image this test boots."""
+    o, st = run(BOOT_PAIR)
+    for l in o.splitlines():
+        w = l.split()
+        if len(w) == 6 and w[0] == "BSL_BOOT":
+            return w[1], w[2:4], w[4], w[5]
+    return None
+
+
+def sha256_file(p):
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+KERNEL = {}
+
+
+def kernel_prepare():
+    """Plan 5.14 V7, while the network is up: the disk boots the image's pair; a new kernel is installed the way a
+    user's update installs one, and the pair the disk now boots is copied out as the app does (boot-pair.sh, then cat)."""
+    if os.environ.get("KERNEL", "1") != "1":
+        print("SKIP kernel (KERNEL=0)")
+        return
+    p = boot_pair()
+    o, _ = run("uname -r")
+    check("kernel: the disk boots the image's pair", p is not None and p[0] == o.strip()
+          and p[1] == [sha256_file("/w/vmlinuz"), sha256_file("/w/initrd.img")], f"{p and p[0]} {p and p[2]}, running {o.strip()}")
+    if p is None:
+        return
+    KERNEL["old"] = p[0]
+    if DISTRO == "debian":
+        o, st = run("export DEBIAN_FRONTEND=noninteractive; a=$(dpkg --print-architecture); "
+                    "c=$(apt-cache policy linux-image-$a | sed -n 's/ *Candidate: //p'); i=$(dpkg-query -W -f='${Version}' linux-image-$a); "
+                    "if [ \"$c\" != \"$i\" ]; then pk=linux-image-$a; else pk=linux-image-rt-$a; fi; "
+                    "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends $pk >/tmp/kernel.log 2>&1 && echo \"installed $pk\"; "
+                    "tail -n 3 /tmp/kernel.log")
+    elif DISTRO == "fedora":
+        # Another kernel the way Fedora installs one (kernel-core is install-only: kernel-install, then the image's
+        # 95-breadstick-vm.install plugin). The newest in updates-testing when it is newer, else the release's own.
+        o, st = run("D='dnf -y -q --disablerepo=breadstick --setopt=install_weak_deps=False'; "
+                    "i=$(rpm -q --qf '%{VERSION}-%{RELEASE}\\n' kernel-core | sort -V | tail -n 1); "
+                    "c=$($D --enablerepo=updates-testing repoquery --latest-limit 1 --qf '%{version}-%{release}\\n' kernel-core 2>/dev/null | sort -V | tail -n 1); "
+                    "if [ -n \"$c\" ] && [ \"$(printf '%s\\n%s\\n' \"$i\" \"$c\" | sort -V | tail -n 1)\" = \"$c\" ] && [ \"$c\" != \"$i\" ]; then "
+                    "$D --enablerepo=updates-testing install \"kernel-core-$c\" >/tmp/kernel.log 2>&1 && echo \"installed kernel-core-$c\"; "
+                    "else echo \"no newer kernel than $i (updates-testing: ${c:-none})\"; exit 77; fi; tail -n 3 /tmp/kernel.log")
+        if st == 77:
+            print(f"SKIP kernel ({o.strip()})")
+            return
+    else:
+        # Arch: the kernel before this one from Arch's own archive, through pacman -U: an Upgrade transaction of
+        # 'linux', so pacman removes the running kernel's modules and the keep-modules hooks must put them back. A
+        # module the running kernel has not loaded yet must still load after it (plan 5.14 V7).
+        o, st = run("for x in loop sctp ip_gre btrfs; do grep -q \"^$x \" /proc/modules && continue; "
+                    "modinfo -n $x 2>/dev/null | grep -q '\\.ko' && { echo $x; break; }; done")
+        KERNEL["probe_module"] = o.strip()
+        o, st = run(NO_BSL_PACMAN + "cur=$(pacman -Q linux | cut -d' ' -f2); "
+                    "v=$(curl -fsS https://archive.archlinux.org/packages/l/linux/ | grep -o 'linux-[0-9][^\"]*-x86_64\\.pkg\\.tar\\.zst\"' "
+                    "| tr -d '\"' | sed 's/^linux-//; s/-x86_64.pkg.tar.zst$//' | sort -uV | awk -v c=\"$cur\" '$0 != c' "
+                    "| while read x; do [ \"$(printf '%s\\n%s\\n' \"$x\" \"$cur\" | sort -V | head -n 1)\" = \"$x\" ] && echo $x; done | tail -n 1); "
+                    "[ -n \"$v\" ] || { echo no older linux; exit 1; }; "
+                    "pacman --config /tmp/pc -U --noconfirm https://archive.archlinux.org/packages/l/linux/linux-$v-x86_64.pkg.tar.zst >/tmp/kernel.log 2>&1 "
+                    "&& echo \"installed linux $v (was $cur)\"; tail -n 4 /tmp/kernel.log")
+    check("kernel: a new kernel installs", st == 0 and "installed" in o, o.strip().replace("\n", " | ")[-300:])
+    if DISTRO == "archlinux":
+        m = KERNEL.get("probe_module")
+        o, st = run(f"r=$(uname -r); ls /usr/lib/modules; cat /usr/lib/modules/$r/breadstick-kept 2>/dev/null | head -c 40; echo; "
+                    f"test ! -e /usr/lib/modules/$r/pkgbase && echo no-pkgbase; {'modprobe ' + m + ' && echo loaded' if m else 'echo loaded'}")
+        check("kernel: the running kernel kept its modules through the update (keep-modules)",
+              "kept by Breadstick" in o and "no-pkgbase" in o and "loaded" in o, o.strip().replace("\n", " | "))
+    q2 = boot_pair()
+    check("kernel: the disk now boots another pair", q2 is not None and q2[0] != p[0], f"{q2 and q2[0]} ({q2 and q2[2]})")
+    if q2 is None or q2[0] == p[0]:
+        return
+    for i, (src, dst) in enumerate(((q2[2], "/w/next-vmlinuz"), (q2[3], "/w/next-initrd.img"))):
+        data, st = bslvm.run(args, "exec cat '" + src + "'", "root")
+        with open(dst, "wb") as f:
+            f.write(data)
+    ok = [sha256_file("/w/next-vmlinuz"), sha256_file("/w/next-initrd.img")] == q2[1]
+    check("kernel: the pair copies out through the agent, sums match", ok,
+          f"{os.path.getsize('/w/next-vmlinuz') >> 20} + {os.path.getsize('/w/next-initrd.img') >> 20} MiB")
+    if ok:
+        KERNEL["new"] = q2[0]
+
+
+def kernel_retake():
+    """After the package checks (which run the app's Updates and Repair, full upgrades on Arch with HEAVY=1): the pair
+    the disk boots now, copied out again when it changed, as the app copies the pair whenever it changes. Arch's
+    kernel test installs an older linux, which a full upgrade then replaces; the pair copied before would name
+    modules that are gone. Fedora's newest kernel is already in, so its pair stays (round 12, debfix)."""
+    if "new" not in KERNEL:
+        return
+    q3 = boot_pair()
+    if q3 is None:
+        check("kernel: the disk still has a boot pair after the package checks", False)
+        KERNEL.pop("new")
+        return
+    if q3[1] == [sha256_file("/w/next-vmlinuz"), sha256_file("/w/next-initrd.img")]:
+        return
+    print(f"kernel: the package checks moved the boot pair to {q3[0]} ({q3[2]}): copied again", flush=True)
+    for src, dst in ((q3[2], "/w/next-vmlinuz"), (q3[3], "/w/next-initrd.img")):
+        data, st = bslvm.run(args, "exec cat '" + src + "'", "root")
+        with open(dst, "wb") as f:
+            f.write(data)
+    ok = [sha256_file("/w/next-vmlinuz"), sha256_file("/w/next-initrd.img")] == q3[1]
+    check("kernel: the pair after the package checks copies out, sums match", ok, q3[0])
+    if ok:
+        KERNEL["new"] = q3[0]
+    else:
+        KERNEL.pop("new")
+
+
+def kernel_boots():
+    """Plan 5.14 V7, after the image's own pair booted the upgraded disk (the grown-disk boot): the copied pair boots
+    as the new kernel with networking; a broken kernel never answers, and the last good pair boots after it."""
+    if "new" not in KERNEL:
+        return
+    q = boot(" (new kernel)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
+    # After boot settles: the agent answers from sysinit, and under TCG bsl-vmnet's start job was still queued
+    # ("inactive") when this ran (amd64, 2026-11-14).
+    o, st = run("systemctl is-system-running --wait >/dev/null 2>&1; uname -r; systemctl is-active bsl-vmnet bsl-x11-relay; ip route | grep -c 'default dev bsl0'; "
+                "lsmod | grep -c -e '^nft_redir' -e '^dummy'")
+    w = o.split()
+    check("kernel: the new kernel runs, with its modules", w[:1] == [KERNEL["new"]] and w[1:3] == ["active", "active"]
+          and w[3:4] == ["1"] and w[4:5] == ["2"], o.strip().replace("\n", " | "))
+    o, _ = run("journalctl -k -b -o cat | grep -c -i -e 'recovery complete' -e 'orphan cleanup' || true")
+    check("power off left a clean journal (no ext4 replay at this boot)", o.strip() == "0", o.strip())
+    power_off(q, " (new kernel)")
+    with open("/w/next-vmlinuz", "rb") as f:
+        head = f.read(1 << 20)
+    with open("/w/bad-vmlinuz", "wb") as f:
+        f.write(head)
+    bad = boot(" (broken kernel)", kernel="/w/bad-vmlinuz", initrd="/w/next-initrd.img", wait=60 if ARCH == "arm64" else 240, must=False)
+    check("kernel: a broken kernel never brings the agent up", bad is None)
+    if bad is not None:
+        power_off(bad, " (broken kernel)")
+    q = boot(" (last good after the broken one)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
+    o, _ = run("uname -r")
+    check("kernel: the last good pair boots after it", o.strip() == KERNEL["new"], o.strip())
+    power_off(q, " (last good)")
+
+
+# The kernel test (V7) first, before the package checks (round 11 critic H2): packages_test runs the app's own Updates
+# and Repair, a real dnf upgrade and distro-sync, and on Fedora those brought the newest kernel themselves, so the
+# kernel test found "no newer kernel" and V7 went untested. The app's commands are not edited to leave kernels out
+# (the test runs them as users get them); the kernel test runs first instead, as a user's first update would bring
+# the kernel, and the package checks then run on a disk that already has it (dnf has no newer kernel to bring).
+kernel_prepare()
+
 if os.environ.get("PARITY", "1") == "1":
     engine_test()
     settings_relay_test()
@@ -1782,6 +1941,7 @@ if os.environ.get("PARITY", "1") == "1":
     # 4.0 round 12, the vmparC loop: Emulated Display, the MCP tools and the Get apps bundles in the VM, V19's spike.
     import vmparc  # noqa: E402
     vmparc.run_all(globals())
+    kernel_retake()
     # Made as root in this container: qemu-test.sh, which is not, could not remove them from /w.
     for _p in ("/w/v12", "/w/drop"):
         __import__("shutil").rmtree(_p, ignore_errors=True)
@@ -2004,130 +2164,8 @@ def file_backup_test():
 tabs_test()
 file_backup_test()
 
-BOOT_PAIR = open("/t/boot-pair.sh").read()
 
 
-def boot_pair():
-    """Android VmCommands.BOOT_PAIR_SCRIPT (copied in boot-pair.sh): (release, [sums], kernel, initrd) or None. A 7th
-    word, NixOS's init, is not expected on the Debian image this test boots."""
-    o, st = run(BOOT_PAIR)
-    for l in o.splitlines():
-        w = l.split()
-        if len(w) == 6 and w[0] == "BSL_BOOT":
-            return w[1], w[2:4], w[4], w[5]
-    return None
-
-
-def sha256_file(p):
-    import hashlib
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
-
-
-KERNEL = {}
-
-
-def kernel_prepare():
-    """Plan 5.14 V7, while the network is up: the disk boots the image's pair; a new kernel is installed the way a
-    user's update installs one, and the pair the disk now boots is copied out as the app does (boot-pair.sh, then cat)."""
-    if os.environ.get("KERNEL", "1") != "1":
-        print("SKIP kernel (KERNEL=0)")
-        return
-    p = boot_pair()
-    o, _ = run("uname -r")
-    check("kernel: the disk boots the image's pair", p is not None and p[0] == o.strip()
-          and p[1] == [sha256_file("/w/vmlinuz"), sha256_file("/w/initrd.img")], f"{p and p[0]} {p and p[2]}, running {o.strip()}")
-    if p is None:
-        return
-    KERNEL["old"] = p[0]
-    if DISTRO == "debian":
-        o, st = run("export DEBIAN_FRONTEND=noninteractive; a=$(dpkg --print-architecture); "
-                    "c=$(apt-cache policy linux-image-$a | sed -n 's/ *Candidate: //p'); i=$(dpkg-query -W -f='${Version}' linux-image-$a); "
-                    "if [ \"$c\" != \"$i\" ]; then pk=linux-image-$a; else pk=linux-image-rt-$a; fi; "
-                    "apt-get -o DPkg::Lock::Timeout=180 install -y -q --no-install-recommends $pk >/tmp/kernel.log 2>&1 && echo \"installed $pk\"; "
-                    "tail -n 3 /tmp/kernel.log")
-    elif DISTRO == "fedora":
-        # Another kernel the way Fedora installs one (kernel-core is install-only: kernel-install, then the image's
-        # 95-breadstick-vm.install plugin). The newest in updates-testing when it is newer, else the release's own.
-        o, st = run("D='dnf -y -q --disablerepo=breadstick --setopt=install_weak_deps=False'; "
-                    "i=$(rpm -q --qf '%{VERSION}-%{RELEASE}\\n' kernel-core | sort -V | tail -n 1); "
-                    "c=$($D --enablerepo=updates-testing repoquery --latest-limit 1 --qf '%{version}-%{release}\\n' kernel-core 2>/dev/null | sort -V | tail -n 1); "
-                    "if [ -n \"$c\" ] && [ \"$(printf '%s\\n%s\\n' \"$i\" \"$c\" | sort -V | tail -n 1)\" = \"$c\" ] && [ \"$c\" != \"$i\" ]; then "
-                    "$D --enablerepo=updates-testing install \"kernel-core-$c\" >/tmp/kernel.log 2>&1 && echo \"installed kernel-core-$c\"; "
-                    "else echo \"no newer kernel than $i (updates-testing: ${c:-none})\"; exit 77; fi; tail -n 3 /tmp/kernel.log")
-        if st == 77:
-            print(f"SKIP kernel ({o.strip()})")
-            return
-    else:
-        # Arch: the kernel before this one from Arch's own archive, through pacman -U: an Upgrade transaction of
-        # 'linux', so pacman removes the running kernel's modules and the keep-modules hooks must put them back. A
-        # module the running kernel has not loaded yet must still load after it (plan 5.14 V7).
-        o, st = run("for x in loop sctp ip_gre btrfs; do grep -q \"^$x \" /proc/modules && continue; "
-                    "modinfo -n $x 2>/dev/null | grep -q '\\.ko' && { echo $x; break; }; done")
-        KERNEL["probe_module"] = o.strip()
-        o, st = run(NO_BSL_PACMAN + "cur=$(pacman -Q linux | cut -d' ' -f2); "
-                    "v=$(curl -fsS https://archive.archlinux.org/packages/l/linux/ | grep -o 'linux-[0-9][^\"]*-x86_64\\.pkg\\.tar\\.zst\"' "
-                    "| tr -d '\"' | sed 's/^linux-//; s/-x86_64.pkg.tar.zst$//' | sort -uV | awk -v c=\"$cur\" '$0 != c' "
-                    "| while read x; do [ \"$(printf '%s\\n%s\\n' \"$x\" \"$cur\" | sort -V | head -n 1)\" = \"$x\" ] && echo $x; done | tail -n 1); "
-                    "[ -n \"$v\" ] || { echo no older linux; exit 1; }; "
-                    "pacman --config /tmp/pc -U --noconfirm https://archive.archlinux.org/packages/l/linux/linux-$v-x86_64.pkg.tar.zst >/tmp/kernel.log 2>&1 "
-                    "&& echo \"installed linux $v (was $cur)\"; tail -n 4 /tmp/kernel.log")
-    check("kernel: a new kernel installs", st == 0 and "installed" in o, o.strip().replace("\n", " | ")[-300:])
-    if DISTRO == "archlinux":
-        m = KERNEL.get("probe_module")
-        o, st = run(f"r=$(uname -r); ls /usr/lib/modules; cat /usr/lib/modules/$r/breadstick-kept 2>/dev/null | head -c 40; echo; "
-                    f"test ! -e /usr/lib/modules/$r/pkgbase && echo no-pkgbase; {'modprobe ' + m + ' && echo loaded' if m else 'echo loaded'}")
-        check("kernel: the running kernel kept its modules through the update (keep-modules)",
-              "kept by Breadstick" in o and "no-pkgbase" in o and "loaded" in o, o.strip().replace("\n", " | "))
-    q2 = boot_pair()
-    check("kernel: the disk now boots another pair", q2 is not None and q2[0] != p[0], f"{q2 and q2[0]} ({q2 and q2[2]})")
-    if q2 is None or q2[0] == p[0]:
-        return
-    for i, (src, dst) in enumerate(((q2[2], "/w/next-vmlinuz"), (q2[3], "/w/next-initrd.img"))):
-        data, st = bslvm.run(args, "exec cat '" + src + "'", "root")
-        with open(dst, "wb") as f:
-            f.write(data)
-    ok = [sha256_file("/w/next-vmlinuz"), sha256_file("/w/next-initrd.img")] == q2[1]
-    check("kernel: the pair copies out through the agent, sums match", ok,
-          f"{os.path.getsize('/w/next-vmlinuz') >> 20} + {os.path.getsize('/w/next-initrd.img') >> 20} MiB")
-    if ok:
-        KERNEL["new"] = q2[0]
-
-
-def kernel_boots():
-    """Plan 5.14 V7, after the image's own pair booted the upgraded disk (the grown-disk boot): the copied pair boots
-    as the new kernel with networking; a broken kernel never answers, and the last good pair boots after it."""
-    if "new" not in KERNEL:
-        return
-    q = boot(" (new kernel)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
-    # After boot settles: the agent answers from sysinit, and under TCG bsl-vmnet's start job was still queued
-    # ("inactive") when this ran (amd64, 2026-11-14).
-    o, st = run("systemctl is-system-running --wait >/dev/null 2>&1; uname -r; systemctl is-active bsl-vmnet bsl-x11-relay; ip route | grep -c 'default dev bsl0'; "
-                "lsmod | grep -c -e '^nft_redir' -e '^dummy'")
-    w = o.split()
-    check("kernel: the new kernel runs, with its modules", w[:1] == [KERNEL["new"]] and w[1:3] == ["active", "active"]
-          and w[3:4] == ["1"] and w[4:5] == ["2"], o.strip().replace("\n", " | "))
-    o, _ = run("journalctl -k -b -o cat | grep -c -i -e 'recovery complete' -e 'orphan cleanup' || true")
-    check("power off left a clean journal (no ext4 replay at this boot)", o.strip() == "0", o.strip())
-    power_off(q, " (new kernel)")
-    with open("/w/next-vmlinuz", "rb") as f:
-        head = f.read(1 << 20)
-    with open("/w/bad-vmlinuz", "wb") as f:
-        f.write(head)
-    bad = boot(" (broken kernel)", kernel="/w/bad-vmlinuz", initrd="/w/next-initrd.img", wait=60 if ARCH == "arm64" else 240, must=False)
-    check("kernel: a broken kernel never brings the agent up", bad is None)
-    if bad is not None:
-        power_off(bad, " (broken kernel)")
-    q = boot(" (last good after the broken one)", kernel="/w/next-vmlinuz", initrd="/w/next-initrd.img")
-    o, _ = run("uname -r")
-    check("kernel: the last good pair boots after it", o.strip() == KERNEL["new"], o.strip())
-    power_off(q, " (last good)")
-
-
-kernel_prepare()
 
 # The disk grows without losing anything (Android vm/VmDisk.kt): data written now must be there
 # after the app makes the file larger, and the file system must fill the larger disk.
