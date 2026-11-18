@@ -1709,7 +1709,13 @@ def packages_test():
     dbs = "stat -c '%n %Y %s' /var/lib/pacman/sync/*.db 2>/dev/null"
     before, _ = run(dbs)
     o, st = run(app_text(f"updates-check-{DISTRO}.sh"))
-    check(f"parity: Updates' check in the VM ({DISTRO}, V15)", st == 0 and o.strip().splitlines()[-1:] != [] and o.strip().splitlines()[-1].isdigit(),
+    # The app reads only the number the count prints (MainViewModel.checkSystemUpdates, LinuxUpdates.parseCount); an
+    # error prints none. Fedora's count ends in `grep -c`, which exits 1 when it counts 0, so an up-to-date system (a
+    # freshly baked image: round 12's rebake) answers "0" with status 1, as Debian's own count does. Status 1 passes
+    # only with that 0.
+    last = o.strip().splitlines()[-1:]
+    counted = last != [] and last[0].isdigit()
+    check(f"parity: Updates' check in the VM ({DISTRO}, V15)", counted and (st == 0 or (st == 1 and last[0] == "0")),
           f"exit {st}: {o.strip()[-200:]}")
     if DISTRO == "archlinux":
         after, _ = run(dbs)
