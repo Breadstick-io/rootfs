@@ -1,0 +1,2 @@
+bsl_n=$( { dnf -q -y makecache >/dev/null 2>&1; o=$(dnf -q check-upgrade 2>/dev/null); r=$?; if [ $r = 0 ] || [ $r = 100 ]; then printf '%s\n' "$o" | grep -c '\.'; else (exit 1); fi
+} | tail -n 1 ); bsl_f=$(if command -v flatpak >/dev/null 2>&1; then flatpak remote-ls --system --updates --columns=ref 2>/dev/null | grep -c /; else echo 0; fi) || true; case "$bsl_n" in ''|*[!0-9]*) echo "$bsl_n" ;; *) case "$bsl_f" in ''|*[!0-9]*) bsl_f=0 ;; esac; echo $((bsl_n + bsl_f)) ;; esac

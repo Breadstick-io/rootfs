@@ -67,8 +67,22 @@ another interface for an address routed to bsl0 to bsl-vmnet: TCP to 127.0.0.1:1
 with `net.ipv4.conf.all.route_localnet=1` and a raw-priority rule that drops anything else from another interface
 addressed to 127.0.0.0/8. Rootless Podman needs none of it (pasta opens host sockets, which are `output`). On an
 image baked before these rules the app's Docker and Podman installs load the same text from a unit of their own
-(`test/containers-*.sh`, Android `linux/Containers.kt`). Published ports are reachable inside the VM; nothing carries
-them to Android yet. `test/qemu-test-containers.sh` proves it per image.
+(`test/containers-*.sh`, Android `linux/Containers.kt`). `test/qemu-test-containers.sh` proves it per image.
+
+**Published ports on Android (4.0, agent runs; Android `vm/VmPorts.kt`).** A port a container publishes
+(`docker run -p 8080:80`) is reachable on the VM's loopback, and the app makes it reachable at the same number on
+Android's 127.0.0.1 (the local network only behind the instance's own switch), with the command it uses for SSH
+(`test/port-forward.sh`, one run a connection). It learns the ports from `test/published-ports.sh`, which it holds as
+root while the VM runs: python3 that prints `P port,kind,name ...` (kind `d` Docker, `p` Podman; `P` alone: none) at
+its start and whenever the set changes, and exits 3 at once where neither Docker nor Podman is installed. It never
+polls: it sleeps in select() on Docker's own event stream (`GET /events` on /run/docker.sock, container start, die
+and destroy; opened only while /run/docker.pid names a running dockerd, so a socket-activated daemon is never woken)
+and on `journalctl -f` matching Podman's container events (Podman logs them to the journal, root's and every
+user's) and systemd's lines about docker.service. On a wake-up it reads Docker's `/containers/json` and `podman ps`
+as root and as each person whose runtime folder has containers. A port published on an address other than every
+address or loopback is left out (the app's forward connects to 127.0.0.1, and FROM 127.0.0.1 for every client:
+Podman's rules for root's containers let a connection back in from that source only). The app's hangup ends it and
+its journalctl. Nothing in the image is specific to it.
 
 ## bsl-x11-relay, port 6000: the display
 

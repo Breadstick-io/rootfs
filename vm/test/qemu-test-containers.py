@@ -3,7 +3,8 @@
 (qemu-test-containers.sh). Boots /w/{vmlinuz,initrd.img,root.img}, makes the user as the app does, runs the app's
 installs and then real containers: the network through bsl-vmnet (DNS, HTTP, HTTPS, a pull), a published port, a bind
 mount, a user network, a build, Compose, the user in the docker group, rootless Podman, and the main ones again after
-a reboot."""
+a reboot. Then the published ports as the app finds and reaches them (published-ports.sh, port-forward.sh): found
+when a container starts and gone when it ends, with no polling."""
 import hashlib
 import json
 import os
@@ -199,6 +200,157 @@ def podman_checks(label):
     check(f"podman{label}: a rootless published port serves a bind-mounted file", "rootless bind mount" in o, one(o))
 
 
+# ---- Published ports on Android (4.0, Android vm/VmPorts.kt): the watcher the app holds in the VM, and the app's own
+# forward command against what containers publish.
+PORTS_TEXT = None
+
+
+class Watcher:
+    """published-ports.sh (the app's VmPorts.WATCH_SCRIPT) held on an agent channel as the app holds it: its lines as
+    they arrive, its exit status if it ends, and the hangup the app's stop is."""
+
+    def __init__(self):
+        self.lines, self.status = [], None
+        self.s = bslvm.connect(args, bslvm.AGENT_PORT)
+        bslvm.request(self.s, "r", bslvm.run_payload(PORTS_TEXT, "root"))
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        buf = b""
+        try:
+            for t, d in bslvm.frames(self.s):
+                if t == "o":
+                    buf += d
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        self.lines.append(line.decode(errors="replace"))
+                elif t == "x":
+                    self.status = int.from_bytes(d[:4], "little", signed=True)
+        except OSError:
+            pass
+
+    def wait(self, pred, secs=40):
+        """Seconds until the newest line satisfies pred, or None."""
+        t0 = time.time()
+        while time.time() - t0 < secs * SLOW:
+            if self.lines and pred(self.lines[-1]):
+                return time.time() - t0
+            time.sleep(0.2)
+        return None
+
+    def ended(self, secs=20):
+        t0 = time.time()
+        while self.status is None and time.time() - t0 < secs * SLOW:
+            time.sleep(0.2)
+        return self.status
+
+    def close(self):
+        # shutdown() first: close() alone leaves the channel open while the reader thread sits in recv().
+        try:
+            import socket
+            self.s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+def words(line):
+    return set((line or "").split()[1:])
+
+
+def through_the_app(port, source="127.0.0.1"):
+    """An HTTP request through the app's own command for one connection (port-forward.sh, VmPortForward's, here for
+    [port] and leaving from [source]: 127.0.0.1 itself is what the app uses for these ports, VmPorts.SOURCE)."""
+    text = open("/t/port-forward.sh").read().replace("2222", str(port)).replace("127.168.1.20", source)
+    assert f" {source} {port};" in text
+    o, st = run(text, stdin=b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    return o, st
+
+
+WATCHER_TICKS = ("exec 2>/dev/null; j=$(for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline | grep -q '^journalctl -f -n 0 -o cat PODMAN_EVENT=start' && echo ${p#/proc/}; done | head -n 1); "
+                 "[ -n \"$j\" ] || { echo none; exit 0; }; w=$(awk '{print $4}' /proc/$j/stat); "
+                 "echo \"$(awk '{print $14+$15}' /proc/$w/stat) $(awk '{print $14+$15}' /proc/$j/stat) $(cat /proc/$w/comm)\"")
+
+
+def ports_before_any_install():
+    w = Watcher()
+    st = w.ended()
+    check("ports: with neither Docker nor Podman the watcher ends at once and says nothing",
+          st == 3 and w.lines == [], f"status {st}, lines {w.lines}")
+    w.close()
+
+
+def ports_checks(label, kept=None):
+    w = Watcher()
+    first = w.wait(lambda l: l.startswith("P"), 30)
+    want = {kept} if kept else set()
+    check(f"ports{label}: the watcher's first line is what is published now",
+          first is not None and (want <= words(w.lines[-1]) if want else w.lines[-1] == "P"), f"{w.lines[-1:]} after {first}")
+    if "docker" in KINDS:
+        run("docker rm -f r14pub >/dev/null 2>&1; docker run -d --name r14pub -p 8085:80 -p 127.0.0.1:8086:80 "
+            "-v /srv/r14:/usr/share/nginx/html:ro nginx:alpine >/dev/null 2>&1")
+        t = w.wait(lambda l: {"8085,d,r14pub", "8086,d,r14pub"} <= words(l))
+        check(f"ports{label}: a Docker container's published ports are found when it starts (every address, and loopback)",
+              t is not None, f"{w.lines[-1:]} after {t and round(t, 1)}s")
+        o, st = run(WAIT.format(url="http://127.0.0.1:8085/") + " >/dev/null; echo up")
+        o, st = through_the_app(8085)
+        check(f"ports{label}: the app's forward command reaches the Docker container's port", "from the bind mount" in o and "200 OK" in o, one(o))
+        o, st = through_the_app(8086)
+        check(f"ports{label}: and the one published on the VM's loopback only", "from the bind mount" in o, one(o))
+        # Nothing happens for a while: the watcher and its journalctl use no processor time at all.
+        a, _ = run(WATCHER_TICKS)
+        time.sleep(20)
+        b, _ = run(WATCHER_TICKS)
+        check(f"ports{label}: while nothing changes the watcher uses no processor time (20 s; it waits, never polls)",
+              a.strip() == b.strip() and a.strip() not in ("", "none"), f"ticks before {a.strip()!r}, after {b.strip()!r}")
+        # The daemon restarted under it: the event stream is opened again, and a later container is still found.
+        run("docker rm -f r14pub >/dev/null 2>&1; systemctl restart docker")
+        t0 = w.wait(lambda l: not ({"8085,d,r14pub"} & words(l)))
+        run("docker run -d --name r14pub2 -p 8088:80 nginx:alpine >/dev/null 2>&1")
+        t = w.wait(lambda l: "8088,d,r14pub2" in words(l))
+        check(f"ports{label}: found again after the Docker daemon restarted", t0 is not None and t is not None, f"{w.lines[-3:]}")
+        run("docker rm -f r14pub2 >/dev/null 2>&1")
+        t = w.wait(lambda l: not any(",d,r14pub" in x for x in words(l)))
+        check(f"ports{label}: a removed container's port is gone", t is not None, f"{w.lines[-1:]} after {t and round(t, 1)}s")
+    if "podman" in KINDS:
+        run("mkdir -p ~/r14 && echo 'rootless bind mount' > ~/r14/index.html; podman rm -f r14pp >/dev/null 2>&1; "
+            "podman run -d --name r14pp -p 8091:80 -v ~/r14:/usr/share/nginx/html:ro docker.io/library/nginx:alpine >/dev/null 2>&1", user="tester")
+        t = w.wait(lambda l: "8091,p,r14pp" in words(l))
+        check(f"ports{label}: a rootless Podman container's published port is found (the journal's event, the user's own podman)",
+              t is not None, f"{w.lines[-1:]} after {t and round(t, 1)}s")
+        run(WAIT.format(url="http://127.0.0.1:8091/") + " >/dev/null; echo up")
+        o, st = through_the_app(8091)
+        check(f"ports{label}: the app's forward command reaches the rootless Podman container's port", "rootless bind mount" in o, one(o))
+        run("podman rm -f r14pr >/dev/null 2>&1; podman run -d --name r14pr -p 8092:80 -v /srv/r14:/usr/share/nginx/html:ro "
+            "docker.io/library/nginx:alpine >/dev/null 2>&1")
+        t = w.wait(lambda l: "8092,p,r14pr" in words(l))
+        check(f"ports{label}: a Podman container run as root is found too", t is not None, f"{w.lines[-1:]} after {t and round(t, 1)}s")
+        run(WAIT.format(url="http://127.0.0.1:8092/") + " >/dev/null; echo up")
+        o, st = through_the_app(8092)
+        check(f"ports{label}: the app's forward command reaches the root Podman container's port", "from the bind mount" in o, one(o))
+        # Why the app's forwards leave from 127.0.0.1 itself: from a client's own loopback address, as SSH's leave,
+        # Podman's rules for root's containers (netavark) let nothing back in (exit 7 after the connect times out).
+        o, st = through_the_app(8092, "127.168.1.20")
+        print(f"NOTE the root Podman container's port from 127.168.1.20: exit {st}, {len(o)} bytes", flush=True)
+        run("podman rm -f r14pp >/dev/null 2>&1", user="tester")
+        run("podman rm -f r14pr >/dev/null 2>&1")
+        t = w.wait(lambda l: not any(",p,r14p" in x for x in words(l)))
+        check(f"ports{label}: removed Podman containers' ports are gone", t is not None, f"{w.lines[-1:]} after {t and round(t, 1)}s")
+    check(f"ports{label}: the watcher is still running, and every line it printed is a P line",
+          w.status is None and all(l == "P" or l.startswith("P ") for l in w.lines), f"status {w.status}, {len(w.lines)} lines")
+    # The app's stop is a hangup: the watcher and its journalctl are gone.
+    w.close()
+    time.sleep(4)
+    o, st = run(WATCHER_TICKS)
+    check(f"ports{label}: the hangup ends the watcher and its journalctl", o.strip() == "none", one(o))
+
+
+PORTS_TEXT = app_text("published-ports.sh")
+ports_before_any_install()
+
 if "docker" in KINDS:
     text = app_text(f"containers-docker-{DISTRO}.sh")
     t0 = time.time()
@@ -220,6 +372,8 @@ if "podman" in KINDS:
     check("podman: newuidmap can map ids (setuid, or its file capability)", "rws" in o or o.count("cap_set") == 2, one(o))
     podman_checks("")
 
+ports_checks("")
+
 o, st = run("df -B1M --output=used / | tail -n 1")
 print(f"NOTE disk used after the installs and tests: {o.strip()} MiB", flush=True)
 
@@ -231,8 +385,14 @@ q = boot(" (second boot)")
 threading.Thread(target=bslvm.net_serve, args=(args, 16), daemon=True).start()
 time.sleep(1)
 if "docker" in KINDS:
-    o, st = run(WAIT.format(url="http://127.0.0.1:8082/") + "; docker rm -f r14keep >/dev/null 2>&1")
+    o, st = run(WAIT.format(url="http://127.0.0.1:8082/"))
     check("docker (second boot): a container set to restart is serving again", "from the bind mount" in o, one(o))
+    # A watcher started after the boot, as the app starts it, says at once what is already published.
+    w2 = Watcher()
+    t = w2.wait(lambda l: "8082,d,r14keep" in words(l), 30)
+    check("ports (second boot): a container already serving is in the watcher's first line", t is not None and len(w2.lines) == 1, f"{w2.lines}")
+    w2.close()
+    run("docker rm -f r14keep >/dev/null 2>&1")
     docker_checks(" (second boot)")
 if "podman" in KINDS:
     podman_checks(" (second boot)")
