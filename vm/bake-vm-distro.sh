@@ -304,7 +304,9 @@ docker rm -f "$P-step" >/dev/null
 docker run --rm --platform "linux/$HOST_ARCH" -e OWNER="$(id -u):$(id -g)" -e DISTRO="$DISTRO" -v "$WORK:/s" -v "$OUT:/o" debian:trixie sh -ec '
   command -v mke2fs >/dev/null || { apt-get update -qq >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq e2fsprogs >/dev/null; }
   mkdir /r
-  tar -C /r --numeric-owner --xattrs -xpf /s/root.tar
+  # --xattrs alone restores only user.* attributes: file capabilities (security.capability, which Fedora and Arch give
+  # newuidmap and newgidmap instead of a setuid bit) were dropped, and rootless Podman could not start (4.0, r14).
+  tar -C /r --numeric-owner --xattrs --xattrs-include="*" -xpf /s/root.tar
   rm -f /r/.dockerenv /r/bsl-step.sh
   rmdir /r/bsl-guest 2>/dev/null || true
   rmdir /r/bsl-stage 2>/dev/null || true

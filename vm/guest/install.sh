@@ -7,7 +7,7 @@
 #                                       # BINDIR: bsl-vmagent, bsl-vmnet and bsl-x11-relay
 #
 # What it writes, all outside any package's files:
-#   /usr/lib/breadstick-vm/{bsl-vmagent,bsl-vmnet,bsl-x11-relay,vmnet-setup,vmnet.nft}
+#   /usr/lib/breadstick-vm/{bsl-vmagent,bsl-vmnet,bsl-x11-relay,vmnet-setup,vmnet.nft,vmnet-containers.nft}
 #   /etc/systemd/system/{bsl-vmagent,bsl-vmnet,bsl-vmnet-setup,bsl-x11-relay}.service, enabled
 #   /etc/fstab, /etc/modules-load.d/breadstick-vm.conf, /etc/systemd/journald.conf.d/breadstick-vm.conf,
 #   /etc/systemd/zram-generator.conf, /etc/profile.d/breadstick-vm.sh (files/profile.sh, then files/terminal.sh: a
@@ -33,6 +33,7 @@ for p in bsl-vmagent bsl-vmnet bsl-x11-relay; do
 done
 install -m 0755 "$F/vmnet-setup" "$ROOT/usr/lib/breadstick-vm/vmnet-setup"
 install -m 0644 "$F/vmnet.nft" "$ROOT/usr/lib/breadstick-vm/vmnet.nft"
+install -m 0644 "$F/vmnet-containers.nft" "$ROOT/usr/lib/breadstick-vm/vmnet-containers.nft"
 for u in bsl-vmagent bsl-vmnet bsl-vmnet-setup bsl-x11-relay; do
   install -m 0644 "$F/$u.service" "$ROOT/etc/systemd/system/$u.service"
 done

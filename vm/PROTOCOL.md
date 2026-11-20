@@ -59,6 +59,17 @@ The app opens real sockets, so Android's VPN, Data Saver and per-app rules apply
 carried: UDP other than DNS, ICMP, connections into the VM. With `bsl.net=tap` on the kernel line
 (the app's TAP option) none of this runs and systemd-networkd does DHCP on the TAP device.
 
+**Containers (4.0).** Docker's and Podman's bridges FORWARD their containers' packets, which the `output` rule never
+sees: a container had no network at all (TCP went into the dummy interface; Docker gives containers 8.8.8.8 for DNS
+when the host's resolver is a loopback address, and UDP is not carried). `vmnet-containers.nft` (table
+`inet breadstick_vm_containers`, loaded by `vmnet-setup` after `vmnet.nft` and never fatal) sends what arrives from
+another interface for an address routed to bsl0 to bsl-vmnet: TCP to 127.0.0.1:15001, UDP port 53 to 127.0.0.1:53,
+with `net.ipv4.conf.all.route_localnet=1` and a raw-priority rule that drops anything else from another interface
+addressed to 127.0.0.0/8. Rootless Podman needs none of it (pasta opens host sockets, which are `output`). On an
+image baked before these rules the app's Docker and Podman installs load the same text from a unit of their own
+(`test/containers-*.sh`, Android `linux/Containers.kt`). Published ports are reachable inside the VM; nothing carries
+them to Android yet. `test/qemu-test-containers.sh` proves it per image.
+
 ## bsl-x11-relay, port 6000: the display
 
 From the W0 spike (vm-spike d103e87), unchanged: it listens on `/tmp/.X11-unix/X0`, the app keeps

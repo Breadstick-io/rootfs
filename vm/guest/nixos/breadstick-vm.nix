@@ -28,6 +28,7 @@ let
       runHook preInstall
       install -Dm755 -t $out/lib/breadstick-vm bsl-vmagent bsl-vmnet bsl-x11-relay files/vmnet-setup
       install -Dm644 files/vmnet.nft $out/lib/breadstick-vm/vmnet.nft
+      install -Dm644 files/vmnet-containers.nft $out/lib/breadstick-vm/vmnet-containers.nft
       runHook postInstall
     '';
     meta.platforms = [ "aarch64-linux" "x86_64-linux" ];

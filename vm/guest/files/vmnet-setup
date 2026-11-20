@@ -14,6 +14,13 @@ ip route replace default dev bsl0
 # The rules beside this script: /usr/lib/breadstick-vm on Debian, Fedora and Arch, the package's store path
 # on NixOS (vm/guest/nixos/breadstick-vm.nix).
 nft -f "$(dirname "$0")/vmnet.nft"
+# Containers (4.0, vmnet-containers.nft): what Docker's and Podman's bridges forward goes to bsl-vmnet on 127.0.0.1,
+# which the kernel refuses from another interface without route_localnet (the rules' "guard" chain keeps the loopback
+# closed otherwise). Never fatal: without them the VM's own network works as before and only containers have none.
+# Written to /proc, not with sysctl: NixOS's unit has no procps on its PATH.
+if [ -f "$(dirname "$0")/vmnet-containers.nft" ] && nft -f "$(dirname "$0")/vmnet-containers.nft"; then
+  echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet || true
+fi
 # resolv.conf is ours (bsl-vmnet answers on 127.0.0.1:53), unless /etc/breadstick-vm/own-resolv-conf
 # exists: then the user manages it.
 if [ ! -e /etc/breadstick-vm/own-resolv-conf ]; then

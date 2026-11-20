@@ -1,0 +1,22 @@
+# Breadstick VM: containers reach the network through bsl-vmnet too (Docker's and Podman's bridges, 4.0).
+# Their packets are FORWARDED, never "output" (vmnet.nft), and the dummy interface would swallow them. What a
+# container sends to an address this machine would route to bsl0 goes to bsl-vmnet: TCP to its port, DNS to its
+# resolver (Docker gives containers 8.8.8.8 when the host's resolver is a loopback address, and UDP other than DNS is
+# not carried). IPv4 only, as the VM is. bsl-vmnet listens on 127.0.0.1, which a packet from another interface reaches
+# only with route_localnet (vmnet-setup sets it); "guard" keeps that from opening this machine's own loopback
+# services to a container that sends to 127.0.0.0/8 itself.
+# A table of its own, loaded after vmnet.nft: a kernel that cannot take these rules still has its network.
+# Android's copy (Containers.NETWORK_RULES) must stay this text: the app loads it where an image has none.
+table inet breadstick_vm_containers
+delete table inet breadstick_vm_containers
+table inet breadstick_vm_containers {
+  chain guard {
+    type filter hook prerouting priority raw; policy accept;
+    iifname != "lo" ip daddr 127.0.0.0/8 drop
+  }
+  chain forwarded {
+    type nat hook prerouting priority -110; policy accept;
+    iifname != "lo" fib daddr oifname "bsl0" meta nfproto ipv4 meta l4proto tcp dnat ip to 127.0.0.1:15001
+    iifname != "lo" fib daddr oifname "bsl0" meta nfproto ipv4 udp dport 53 dnat ip to 127.0.0.1:53
+  }
+}
