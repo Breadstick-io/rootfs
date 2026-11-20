@@ -52,6 +52,8 @@ def scan():
             docker_ports(found)
         except (OSError, ValueError, IndexError):
             pass
+    global PODMAN
+    PODMAN = PODMAN or shutil.which("podman")
     if PODMAN:
         podman_ports(found, [])
         for u in pwd.getpwall():
