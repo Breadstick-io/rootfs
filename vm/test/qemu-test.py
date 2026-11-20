@@ -1227,6 +1227,14 @@ if os.path.exists("/usr/bin/Xvfb") and not ONLY_VMPARC:
     time.sleep(1)
     o, st = run("DISPLAY=:0 xdpyinfo | grep -E 'dimensions|number of screens'", user="tester")
     check("x11 relay", st == 0 and "1280x800" in o, o.strip().replace("\n", " | "))
+    # ONLY_FLATPAK=1 (4.0, r14): the Flatpak checks alone (flatpak.py), and off.
+    if os.environ.get("ONLY_FLATPAK") == "1":
+        import flatpak  # noqa: E402
+        flatpak.run_all(globals())
+        xvfb.kill()
+        power_off(q, " (flatpak only)")
+        print(f"\n{len(fails)} failed: {fails}" if fails else "\nALL PASS")
+        sys.exit(1 if fails else 0)
     o, st = run("command -v startxfce4 >/dev/null || exit 77; (DISPLAY=:0 timeout 25 startxfce4 >/tmp/xfce.log 2>&1 &); "
                 "sleep 20; DISPLAY=:0 xwininfo -root -children | grep -c -E 'xfce4-panel|xfdesktop|Xfwm4' ; pgrep -c -u tester -x xfwm4",
                 user="tester")
@@ -1243,6 +1251,10 @@ if os.path.exists("/usr/bin/Xvfb") and not ONLY_VMPARC:
         v10_drop_test()
         v11_bench()
     desktop_test()
+    # FLATPAK=1: Flatpak in the VM (flatpak.py; off by default, it downloads about 1 GB from Flathub).
+    if os.environ.get("FLATPAK") == "1":
+        import flatpak  # noqa: E402
+        flatpak.run_all(globals())
     xvfb.kill()
 
 if not ONLY_VMPARC:

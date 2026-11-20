@@ -16,6 +16,8 @@
 #   PARITY=0 vm/test/qemu-test.sh ...              # skip the ways in and the packages checks (plan 5.14 V13, V15, V16, V18)
 #                                                   # and files, devices, the scale, the redraw (V12, V14, V10, V11)
 #   HEAVY=0|1 vm/test/qemu-test.sh ...             # Repair and Updates (full upgrades) in the packages checks (default: 1 on arm64)
+#   FLATPAK=1 vm/test/qemu-test.sh ...             # also Flatpak in the VM (flatpak.py: an app from Flathub, about 1 GB)
+#   ONLY_FLATPAK=1 vm/test/qemu-test.sh ...        # boot, the user, the network, the display, the Flatpak checks, and off
 # arm64 runs under KVM on an arm64 host; amd64 under TCG (slow). Needs the bsl-vmtest:3 image
 # (Debian 13 + qemu-system-arm/x86 + python3; Dockerfile beside this script).
 set -eu
@@ -72,5 +74,5 @@ fi
 # VIRGL_DIR=<folder holding a vtest server's .virgl_test socket> (round 12, V19's spike in vmparc.py): mounted at /v.
 V=
 [ -n "${VIRGL_DIR:-}" ] && V="-v $(cd "$VIRGL_DIR" && pwd):/v -e VIRGL_SOCK=/v/.virgl_test"
-docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $V $AGENT_ENV -e VMPARC="${VMPARC:-1}" -e VMPARC_BREAK="${VMPARC_BREAK:-}" -e ONLY_VMPARC="${ONLY_VMPARC:-}" -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e HEAVY="${HEAVY:-}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
+docker run --rm --platform "linux/$(dpkg --print-architecture)" --name "${CNAME:-bsl-vmtest-$ARCH-$$}" $A $R $V $AGENT_ENV -e FLATPAK="${FLATPAK:-}" -e ONLY_FLATPAK="${ONLY_FLATPAK:-}" -e FLATPAK_APP="${FLATPAK_APP:-org.gnome.Calculator}" -e FLATPAK_WINDOW="${FLATPAK_WINDOW:-Calculator}" -e VMPARC="${VMPARC:-1}" -e VMPARC_BREAK="${VMPARC_BREAK:-}" -e ONLY_VMPARC="${ONLY_VMPARC:-}" -e KERNEL="${KERNEL:-1}" -e GROW="${GROW:-1}" -e FILEBACKUP="${FILEBACKUP:-1}" -e PARITY="${PARITY:-1}" -e HEAVY="${HEAVY:-}" -e CID="${CID:-77}" --device /dev/kvm --device /dev/vhost-vsock --security-opt seccomp=unconfined --security-opt apparmor=unconfined -e ARCH="$ARCH" \
   -v "$work:/w" -v "$here:/t:ro" bsl-vmtest:3 python3 /t/qemu-test.py
