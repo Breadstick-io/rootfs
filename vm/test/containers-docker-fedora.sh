@@ -1,7 +1,7 @@
 bsl_m=; if [ -r /usr/lib/breadstick/bsl-os.sh ] && . /usr/lib/breadstick/bsl-os.sh && command -v bsl_pkg_mark >/dev/null 2>&1 && command -v bsl_pkg_also >/dev/null 2>&1 && bsl_pkg_mark install; then bsl_m=1; fi
 ( [ -z "$bsl_m" ] || bsl_pkg_also $$
 set -e
-if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Docker needs the VM engine. Nothing was installed.'; exit 1; fi
+if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Docker needs the virtual machine engine. Nothing was installed.'; exit 1; fi
 echo '[1/3] Installing Docker...'
 { B=; grep -qs '^\[breadstick' /etc/yum.repos.d/*.repo /etc/distro.repos.d/*.repo /usr/share/dnf5/repos.d/*.repo && B='breadstick*.'; dnf -y makecache --refresh "--setopt=${B}skip_if_unavailable=True"; }
 { if [ -r /usr/lib/breadstick/bsl-os.sh ]; then n=$(. /usr/lib/breadstick/bsl-os.sh && bsl_pkg_names moby-engine docker-cli docker-compose docker-buildx | tr '\n' ' ') || n='moby-engine docker-cli docker-compose docker-buildx'; else n='moby-engine docker-cli docker-compose docker-buildx'; fi; if [ -z "${n# }" ]; then echo '[BSL] This Linux instance has no package for this; nothing was installed.' >&2; (exit 1); else . /usr/lib/breadstick/bsl-os.sh && bsl_pkg_install moby-engine docker-cli docker-compose docker-buildx; fi; }

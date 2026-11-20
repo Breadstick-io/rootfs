@@ -1,5 +1,5 @@
 set -e
-if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Docker needs the VM engine. Nothing was installed.'; exit 1; fi
+if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Docker needs the virtual machine engine. Nothing was installed.'; exit 1; fi
 echo '[1/3] Installing Docker...'
 export DEBIAN_FRONTEND=noninteractive; apt-get update
 apt-get install -y --no-install-recommends docker.io docker-cli docker-compose docker-buildx

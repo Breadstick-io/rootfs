@@ -129,7 +129,7 @@ if DISTRO == "archlinux":
 o, st = run("d=$(mktemp -d) && sed 's#! -d /usr/lib/breadstick-vm \\]#! -d '\"$d\"'/none ]#' > \"$d/s.sh\"; sh \"$d/s.sh\"; r=$?; "
             "rm -f \"$d/s.sh\"; rmdir \"$d\"; exit $r", stdin=open(f"/t/containers-docker-{DISTRO}.sh", "rb").read())
 check("the install refuses outside a Breadstick VM, nothing installed",
-      st == 1 and "needs the VM engine" in o and "[1/3]" not in o, one(o))
+      st == 1 and "needs the virtual machine engine" in o and "[1/3]" not in o, one(o))
 
 
 def docker_checks(label):

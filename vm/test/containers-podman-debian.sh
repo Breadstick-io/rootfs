@@ -1,5 +1,5 @@
 set -e
-if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Podman needs the VM engine. Nothing was installed.'; exit 1; fi
+if [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ] || [ ! -d /usr/lib/breadstick-vm ]; then echo 'Podman needs the virtual machine engine. Nothing was installed.'; exit 1; fi
 echo '[1/3] Installing Podman...'
 export DEBIAN_FRONTEND=noninteractive; apt-get update
 apt-get install -y --no-install-recommends podman uidmap passt aardvark-dns
