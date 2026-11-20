@@ -457,6 +457,10 @@ if [ -d /var/lib/pacman/local ] && [ -d "$s/var/lib/pacman/local" ]; then
   set -e
   [ "$r" = 0 ] || echo "package database (pacman): not checked (exit $r)"
 fi
+if command -v rpm >/dev/null 2>&1 && [ ! -e /etc/NIXOS ]; then
+  rpm -a --setperms >/dev/null 2>&1 || true
+  echo "rpm modes put back"
+fi
 if [ -s "$w/nix-db" ]; then
   set +e
   ( set -e

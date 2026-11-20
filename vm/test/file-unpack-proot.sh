@@ -74,6 +74,11 @@ if bsl_instage "$d/info/x" && { { [ -f "$d/status" ] && grep -qx "Package: $x" "
   rm -f "$d/info/$x".* "$d/info/$x":all.* "$d/$x.bsl-files"
   echo "$x taken out (the VM runs systemd itself): $n diversions undone" >>"${BSL_RESTORE_LOG:-/var/log/breadstick-vm-restore.log}"
 fi
+for t in systemctl journalctl systemd-notify systemd-run systemd-escape hostnamectl timedatectl localectl loginctl systemd-tmpfiles; do
+  f=$s/usr/local/bin/$t
+  if [ -f "$f" ] && [ ! -L "$f" ] && grep -q "This file is breadstick-systemd's" "$f" 2>/dev/null; then rm -f "$f"; fi
+done
+rm -rf "$s/var/lib/breadstick-systemd/stubs"
 for p in usr/local/bin/systemctl usr/local/bin/systemd-tmpfiles usr/local/bin/systemd-sysusers usr/local/bin/setpriv usr/local/bin/dpkg-statoverride usr/bin/systemctl usr/bin/systemd-tmpfiles usr/bin/systemd-sysusers usr/bin/setpriv usr/bin/dpkg-statoverride usr/sbin/policy-rc.d; do
   standin "$s/$p" || continue
   rm -f "$s/$p"
@@ -90,3 +95,8 @@ if [ -f "$c" ] && grep -Eq '^# Breadstick Linux \((the image bake|package-fixups
   cat "$c.bsl-new" > "$c"
   rm -f "$c.bsl-new"
 fi
+for d in usr opt nix/store etc/breadstick etc/xdg etc/pulse etc/fonts etc/profile.d var/lib/breadstick var/lib/dnf var/lib/rpm var/lib/dpkg var/lib/pacman var/cache/libdnf5 var/cache/fontconfig var/cache/man; do
+  [ -d "$s/$d" ] && [ ! -L "$s/$d" ] || continue
+  find "$s/$d" -xdev \( -path '*/cups/backend' -o -path '*/polkit-1/rules.d' \) -prune -o -type f -perm 0600 -exec chmod go+r {} + 2>/dev/null || true
+  find "$s/$d" -xdev \( -path '*/cups/backend' -o -path '*/polkit-1/rules.d' \) -prune -o \( -type f -o -type d \) -perm 0700 -exec chmod go+rx {} + 2>/dev/null || true
+done
